@@ -29,7 +29,7 @@ import (
 // RabbitmqCluster is the Schema for the RabbitmqCluster API. Each instance of this object
 // corresponds to a single RabbitMQ cluster.
 type RabbitmqCluster struct {
-	// Embedded metadata identifying a Kind and API Verison of an object.
+	// Embedded metadata identifying a Kind and API Version of an object.
 	// For more info, see: https://pkg.go.dev/k8s.io/apimachinery/pkg/apis/meta/v1#TypeMeta
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -84,6 +84,16 @@ type RabbitmqClusterSpec struct {
 	// +kubebuilder:validation:Minimum:=0
 	// +kubebuilder:default:=604800
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
+	// DelayStartSeconds is the time the init container (`setup-container`) will sleep before terminating.
+	// This effectively delays the time between starting the Pod and starting the `rabbitmq` container.
+	// RabbitMQ relies on up-to-date DNS entries early during peer discovery.
+	// The purpose of this artificial delay is to ensure that DNS entries are up-to-date when booting RabbitMQ.
+	// For more information, see https://github.com/kubernetes/kubernetes/issues/92559
+	// If your Kubernetes DNS backend is configured with a low DNS cache value or publishes not ready addresses
+	// promptly, you can decrase this value or set it to 0.
+	// +kubebuilder:validation:Minimum:=0
+	// +kubebuilder:default:=30
+	DelayStartSeconds *int32 `json:"delayStartSeconds,omitempty"`
 	// Secret backend configuration for the RabbitmqCluster.
 	// Enables to fetch default user credentials and certificates from K8s external secret stores.
 	SecretBackend SecretBackend `json:"secretBackend,omitempty"`
@@ -233,6 +243,13 @@ type StatefulSetSpec struct {
 	// Template.
 	// +optional
 	UpdateStrategy *appsv1.StatefulSetUpdateStrategy `json:"updateStrategy,omitempty" protobuf:"bytes,7,opt,name=updateStrategy"`
+
+	// The minimum number of seconds for which a newly created StatefulSet pod should
+	// be ready without any of its container crashing, for it to be considered
+	// available. Defaults to 0 (pod will be considered available as soon as it
+	// is ready).
+	// +optional
+	MinReadySeconds int32 `json:"minReadySeconds,omitempty" protobuf:"varint,4,opt,name=minReadySeconds"`
 }
 
 // EmbeddedLabelsAnnotations is an embedded subset of the fields included in k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta.
@@ -307,7 +324,7 @@ type PodTemplateSpec struct {
 // It contains TypeMeta and a reduced ObjectMeta.
 // Field status is omitted.
 type PersistentVolumeClaim struct {
-	// Embedded metadata identifying a Kind and API Verison of an object.
+	// Embedded metadata identifying a Kind and API Version of an object.
 	// For more info, see: https://pkg.go.dev/k8s.io/apimachinery/pkg/apis/meta/v1#TypeMeta
 	metav1.TypeMeta `json:",inline"`
 	// +optional
@@ -446,7 +463,7 @@ func (cluster *RabbitmqCluster) ServiceSubDomain() string {
 
 // RabbitmqClusterList contains a list of RabbitmqClusters.
 type RabbitmqClusterList struct {
-	// Embedded metadata identifying a Kind and API Verison of an object.
+	// Embedded metadata identifying a Kind and API Version of an object.
 	// For more info, see: https://pkg.go.dev/k8s.io/apimachinery/pkg/apis/meta/v1#TypeMeta
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`

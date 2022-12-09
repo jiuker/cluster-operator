@@ -811,12 +811,13 @@ var _ = Describe("StatefulSet", func() {
 				container := extractContainer(statefulSet.Spec.Template.Spec.Containers, "rabbitmq")
 				Expect(container.Ports).To(ContainElement(expectedPort))
 			},
-			Entry("MQTT", "rabbitmq_mqtt", "mqtt", 1883),
-			Entry("MQTT-over-WebSockets", "rabbitmq_web_mqtt", "web-mqtt", 15675),
-			Entry("STOMP", "rabbitmq_stomp", "stomp", 61613),
-			Entry("STOMP-over-WebSockets", "rabbitmq_web_stomp", "web-stomp", 15674),
-			Entry("Stream", "rabbitmq_stream", "stream", 5552),
-			Entry("OSR", "rabbitmq_multi_dc_replication", "stream", 5552),
+			EntryDescription("%s plugin is enabled"),
+			Entry(nil, "rabbitmq_mqtt", "mqtt", 1883),
+			Entry(nil, "rabbitmq_web_mqtt", "web-mqtt", 15675),
+			Entry(nil, "rabbitmq_stomp", "stomp", 61613),
+			Entry(nil, "rabbitmq_web_stomp", "web-stomp", 15674),
+			Entry(nil, "rabbitmq_stream", "stream", 5552),
+			Entry(nil, "rabbitmq_multi_dc_replication", "stream", 5552),
 		)
 
 		It("uses required Environment Variables", func() {
@@ -910,7 +911,7 @@ default_pass = {{ .Data.data.password }}
 					})
 					It("overrides operator-set Vault annotations", func() {
 						a := statefulSet.Spec.Template.Annotations
-						// user overriden annotations
+						// user overridden annotations
 						Expect(a).To(HaveKeyWithValue("vault.hashicorp.com/agent-init-first", "false"))
 						Expect(a).To(HaveKeyWithValue("mykey", "myval"))
 						// opererator-set annotations
@@ -935,7 +936,7 @@ default_pass = {{ .Data.data.password }}
 								"cp /tmp/rabbitmq-plugins/enabled_plugins /operator/enabled_plugins ; "+
 								"echo '[default]' > /var/lib/rabbitmq/.rabbitmqadmin.conf "+
 								"&& sed -e 's/default_user/username/' -e 's/default_pass/password/' /etc/rabbitmq/conf.d/11-default_user.conf >> /var/lib/rabbitmq/.rabbitmqadmin.conf "+
-								"&& chmod 600 /var/lib/rabbitmq/.rabbitmqadmin.conf",
+								"&& chmod 600 /var/lib/rabbitmq/.rabbitmqadmin.conf ; sleep 30",
 						),
 						"VolumeMounts": Not(ContainElement([]corev1.VolumeMount{
 							{
@@ -1333,7 +1334,7 @@ default_pass = {{ .Data.data.password }}
 						"cp /tmp/rabbitmq-plugins/enabled_plugins /operator/enabled_plugins ; "+
 						"echo '[default]' > /var/lib/rabbitmq/.rabbitmqadmin.conf "+
 						"&& sed -e 's/default_user/username/' -e 's/default_pass/password/' /tmp/default_user.conf >> /var/lib/rabbitmq/.rabbitmqadmin.conf "+
-						"&& chmod 600 /var/lib/rabbitmq/.rabbitmqadmin.conf",
+						"&& chmod 600 /var/lib/rabbitmq/.rabbitmqadmin.conf ; sleep 30",
 				),
 				"VolumeMounts": ConsistOf([]corev1.VolumeMount{
 					{
@@ -1605,6 +1606,18 @@ default_pass = {{ .Data.data.password }}
 				stsBuilder := builder.StatefulSet()
 				Expect(stsBuilder.Update(statefulSet)).To(Succeed())
 				Expect(*statefulSet.Spec.Replicas).To(Equal(int32(10)))
+			})
+
+			It("overrides statefulSet.spec.MinReadySeconds", func() {
+				instance.Spec.Override.StatefulSet = &rabbitmqv1beta1.StatefulSet{
+					Spec: &rabbitmqv1beta1.StatefulSetSpec{
+						MinReadySeconds: 10,
+					},
+				}
+
+				stsBuilder := builder.StatefulSet()
+				Expect(stsBuilder.Update(statefulSet)).To(Succeed())
+				Expect(statefulSet.Spec.MinReadySeconds).To(Equal(int32(10)))
 			})
 
 			It("overrides statefulSet.spec.podManagementPolicy", func() {
@@ -2281,6 +2294,7 @@ func generateRabbitmqCluster() rabbitmqv1beta1.RabbitmqCluster {
 			Image:                         "rabbitmq-image-from-cr",
 			ImagePullSecrets:              []corev1.LocalObjectReference{{Name: "my-super-secret"}},
 			TerminationGracePeriodSeconds: pointer.Int64Ptr(604800),
+			DelayStartSeconds:             pointer.Int32Ptr(30),
 			Service: rabbitmqv1beta1.RabbitmqClusterServiceSpec{
 				Type:        "this-is-a-service",
 				Annotations: map[string]string{},

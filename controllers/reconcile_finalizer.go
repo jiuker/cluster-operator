@@ -31,11 +31,7 @@ func (r *RabbitmqClusterReconciler) addFinalizerIfNeeded(ctx context.Context, ra
 
 func (r *RabbitmqClusterReconciler) removeFinalizer(ctx context.Context, rabbitmqCluster *rabbitmqv1beta1.RabbitmqCluster) error {
 	controllerutil.RemoveFinalizer(rabbitmqCluster, deletionFinalizer)
-	if err := r.Client.Update(ctx, rabbitmqCluster); err != nil {
-		return err
-	}
-
-	return nil
+	return r.Client.Update(ctx, rabbitmqCluster)
 }
 
 func (r *RabbitmqClusterReconciler) prepareForDeletion(ctx context.Context, rabbitmqCluster *rabbitmqv1beta1.RabbitmqCluster) error {
@@ -53,7 +49,7 @@ func (r *RabbitmqClusterReconciler) prepareForDeletion(ctx context.Context, rabb
 			}
 			// Add label on all Pods to be picked up in pre-stop hook via Downward API
 			if err := r.addRabbitmqDeletionLabel(ctx, rabbitmqCluster); err != nil {
-				return fmt.Errorf("failed to add deletion markers to RabbitmqCluster Pods: %s", err.Error())
+				return fmt.Errorf("failed to add deletion markers to RabbitmqCluster Pods: %w", err)
 			}
 			// Delete StatefulSet immediately after changing pod labels to minimize risk of them respawning.
 			// There is a window where the StatefulSet could respawn Pods without the deletion label in this order.
@@ -61,7 +57,7 @@ func (r *RabbitmqClusterReconciler) prepareForDeletion(ctx context.Context, rabb
 			// Addressing #648: if both rabbitmqCluster and the statefulSet returned by r.Get() are stale (and match each other),
 			// setting the stale statefulSet's uid in the precondition can avoid mis-deleting any currently running statefulSet sharing the same name.
 			if err := r.Client.Delete(ctx, sts, &client.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); client.IgnoreNotFound(err) != nil {
-				return fmt.Errorf("cannot delete StatefulSet: %s", err.Error())
+				return fmt.Errorf("cannot delete StatefulSet: %w", err)
 			}
 
 			return nil
@@ -95,7 +91,7 @@ func (r *RabbitmqClusterReconciler) addRabbitmqDeletionLabel(ctx context.Context
 		pod := &pods.Items[i]
 		pod.Labels[resource.DeletionMarker] = "true"
 		if err := r.Client.Update(ctx, pod); client.IgnoreNotFound(err) != nil {
-			return fmt.Errorf("cannot Update Pod %s in Namespace %s: %s", pod.Name, pod.Namespace, err.Error())
+			return fmt.Errorf("cannot Update Pod %s in Namespace %s: %w", pod.Name, pod.Namespace, err)
 		}
 	}
 

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	storagev1 "k8s.io/api/storage/v1"
 	"log"
 	"net/http"
 	"os"
@@ -116,7 +117,7 @@ func makeRequest(url, httpMethod, rabbitmqUsername, rabbitmqPassword string, bod
 	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Printf("Failed to make api request to url %s with err: %+v \n", url, err)
-		return responseBody, fmt.Errorf("failed with err: %v to api endpoint: %s", err, url)
+		return responseBody, fmt.Errorf("failed with err: %w to api endpoint: %s", err, url)
 	}
 	defer resp.Body.Close()
 	responseBody, err = ioutil.ReadAll(resp.Body)
@@ -434,7 +435,6 @@ func newRabbitmqCluster(namespace, instanceName string) *rabbitmqv1beta1.Rabbitm
 }
 
 func overrideSecurityContextForOpenshift(cluster *rabbitmqv1beta1.RabbitmqCluster) {
-
 	cluster.Spec.Override = rabbitmqv1beta1.RabbitmqClusterOverrideSpec{
 		StatefulSet: &rabbitmqv1beta1.StatefulSet{
 			Spec: &rabbitmqv1beta1.StatefulSetSpec{
@@ -451,10 +451,9 @@ func overrideSecurityContextForOpenshift(cluster *rabbitmqv1beta1.RabbitmqCluste
 			},
 		},
 	}
-
 }
 
-//the updateFn can change properties of the RabbitmqCluster CR
+// the updateFn can change properties of the RabbitmqCluster CR
 func updateRabbitmqCluster(ctx context.Context, client client.Client, name, namespace string, updateFn func(*rabbitmqv1beta1.RabbitmqCluster)) error {
 	var result rabbitmqv1beta1.RabbitmqCluster
 
@@ -645,7 +644,18 @@ func hasFeatureEnabled(cluster *rabbitmqv1beta1.RabbitmqCluster, featureFlagName
 	return false
 }
 
-// asserts an event with reason: "TLSError", occurs for the cluster in it's namespace
+func runningRabbitmqVersion(cluster *rabbitmqv1beta1.RabbitmqCluster) string {
+	output, err := kubectlExec(cluster.Namespace,
+		statefulSetPodName(cluster, 0),
+		"rabbitmq",
+		"rabbitmqctl",
+		"version",
+	)
+	Expect(err).NotTo(HaveOccurred())
+	return strings.TrimSpace(string(output))
+}
+
+// asserts an event with reason: "TLSError", occurs for the cluster in its namespace
 func assertTLSError(cluster *rabbitmqv1beta1.RabbitmqCluster) {
 	var err error
 
@@ -753,7 +763,7 @@ func k8sCreateTLSSecret(secretName, secretNamespace, certPath, keyPath string) e
 	)
 
 	if err != nil {
-		return fmt.Errorf("Failed with error: %v\nOutput: %v\n", err.Error(), string(output))
+		return fmt.Errorf("Failed with error: %w\nOutput: %v\n", err, string(output))
 	}
 
 	return nil
@@ -769,7 +779,7 @@ func k8sDeleteSecret(secretName, secretNamespace string) error {
 	)
 
 	if err != nil {
-		return fmt.Errorf("Failed with error: %v\nOutput: %v\n", err.Error(), string(output))
+		return fmt.Errorf("Failed with error: %w\nOutput: %v\n", err, string(output))
 	}
 
 	return nil
@@ -1068,4 +1078,32 @@ func pod(ctx context.Context, clientSet *kubernetes.Clientset, r *rabbitmqv1beta
 		return err
 	}, 10).Should(Succeed())
 	return pod
+}
+
+func defaultStorageClass(ctx context.Context, clientSet *kubernetes.Clientset) *storagev1.StorageClass {
+	var storageClasses *storagev1.StorageClassList
+	defaultClassAnnotation := "storageclass.kubernetes.io/is-default-class"
+	var err error
+	storageClasses, err = clientSet.StorageV1().StorageClasses().List(ctx, metav1.ListOptions{})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(storageClasses.Items).NotTo(BeEmpty(), "expected at least 1 storageClass, but found 0")
+	for _, storageClass := range storageClasses.Items {
+		defaultClassAnnotationValue, ok := storageClass.ObjectMeta.Annotations[defaultClassAnnotation]
+		if !ok {
+			// StorageClass is not the default
+			continue
+		}
+		isDefaultClass, err := strconv.ParseBool(defaultClassAnnotationValue)
+		if err == nil && isDefaultClass {
+			return &storageClass
+		}
+	}
+	return nil
+}
+
+func volumeExpansionSupported(ctx context.Context, clientSet *kubernetes.Clientset) bool {
+	clusterDefaultStorageClass := defaultStorageClass(ctx, clientSet)
+	Expect(clusterDefaultStorageClass).NotTo(BeNil(), "expected to find a default storageClass, but failed to find one")
+	return clusterDefaultStorageClass.AllowVolumeExpansion != nil &&
+		*clusterDefaultStorageClass.AllowVolumeExpansion == true
 }

@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -82,6 +83,7 @@ func (builder *StatefulSetBuilder) Build() (client.Object, error) {
 		if overrideSts.Spec.ServiceName != "" {
 			sts.Spec.ServiceName = overrideSts.Spec.ServiceName
 		}
+
 	}
 
 	return sts, nil
@@ -125,12 +127,12 @@ func (builder *StatefulSetBuilder) Update(object client.Object) error {
 
 	if builder.Instance.Spec.Override.StatefulSet != nil {
 		if err := applyStsOverride(builder.Instance, builder.Scheme, sts, builder.Instance.Spec.Override.StatefulSet); err != nil {
-			return fmt.Errorf("failed applying StatefulSet override: %v", err)
+			return fmt.Errorf("failed applying StatefulSet override: %w", err)
 		}
 	}
 
 	if err := controllerutil.SetControllerReference(builder.Instance, sts, builder.Scheme); err != nil {
-		return fmt.Errorf("failed setting controller reference: %v", err)
+		return fmt.Errorf("failed setting controller reference: %w", err)
 	}
 	return nil
 }
@@ -161,6 +163,10 @@ func applyStsOverride(instance *rabbitmqv1beta1.RabbitmqCluster, scheme *runtime
 		sts.Spec.PodManagementPolicy = stsOverride.Spec.PodManagementPolicy
 	}
 
+	if stsOverride.Spec.MinReadySeconds != 0 {
+		sts.Spec.MinReadySeconds = stsOverride.Spec.MinReadySeconds
+	}
+
 	if len(stsOverride.Spec.VolumeClaimTemplates) != 0 {
 		// If spec.persistence.storage == 0, ignore PVC overrides.
 		// Main reason for that is that there is no default PVC in such case (emptyDir is used instead)
@@ -168,7 +174,7 @@ func applyStsOverride(instance *rabbitmqv1beta1.RabbitmqCluster, scheme *runtime
 		// where storage is set to 0 and yet there are PVCs with data
 		if instance.Spec.Persistence.Storage.Cmp(k8sresource.MustParse("0Gi")) == 0 {
 			logger := ctrl.Log.WithName("statefulset").WithName("RabbitmqCluster")
-			logger.Info(fmt.Sprintf("Warning: persistentVolumeClaim overrides are ignored for cluster \"%s\", becasue spec.persistence.storage is set to zero.", sts.GetName()))
+			logger.Info(fmt.Sprintf("Warning: persistentVolumeClaim overrides are ignored for cluster \"%s\", because spec.persistence.storage is set to zero.", sts.GetName()))
 		} else {
 			volumeClaimTemplatesOverride := stsOverride.Spec.VolumeClaimTemplates
 			pvcOverride := make([]corev1.PersistentVolumeClaim, len(volumeClaimTemplatesOverride))
@@ -177,7 +183,7 @@ func applyStsOverride(instance *rabbitmqv1beta1.RabbitmqCluster, scheme *runtime
 				pvcOverride[i].Namespace = sts.Namespace // PVC should always be in the same namespace as the Stateful Set
 				pvcOverride[i].Spec = volumeClaimTemplatesOverride[i].Spec
 				if err := controllerutil.SetControllerReference(instance, &pvcOverride[i], scheme); err != nil {
-					return fmt.Errorf("failed setting controller reference: %v", err)
+					return fmt.Errorf("failed setting controller reference: %w", err)
 				}
 				disableBlockOwnerDeletion(pvcOverride[i])
 			}
@@ -227,7 +233,7 @@ func persistentVolumeClaim(instance *rabbitmqv1beta1.RabbitmqCluster, scheme *ru
 	}
 
 	if err := controllerutil.SetControllerReference(instance, &pvc, scheme); err != nil {
-		return []corev1.PersistentVolumeClaim{}, fmt.Errorf("failed setting controller reference: %v", err)
+		return []corev1.PersistentVolumeClaim{}, fmt.Errorf("failed setting controller reference: %w", err)
 	}
 	disableBlockOwnerDeletion(pvc)
 
@@ -245,23 +251,23 @@ func disableBlockOwnerDeletion(pvc corev1.PersistentVolumeClaim) {
 func patchPodSpec(podSpec, podSpecOverride *corev1.PodSpec) (corev1.PodSpec, error) {
 	originalPodSpec, err := json.Marshal(podSpec)
 	if err != nil {
-		return corev1.PodSpec{}, fmt.Errorf("error marshalling statefulSet podSpec: %v", err)
+		return corev1.PodSpec{}, fmt.Errorf("error marshalling statefulSet podSpec: %w", err)
 	}
 
 	patch, err := json.Marshal(podSpecOverride)
 	if err != nil {
-		return corev1.PodSpec{}, fmt.Errorf("error marshalling statefulSet podSpec override: %v", err)
+		return corev1.PodSpec{}, fmt.Errorf("error marshalling statefulSet podSpec override: %w", err)
 	}
 
 	patchedJSON, err := strategicpatch.StrategicMergePatch(originalPodSpec, patch, corev1.PodSpec{})
 	if err != nil {
-		return corev1.PodSpec{}, fmt.Errorf("error patching podSpec: %v", err)
+		return corev1.PodSpec{}, fmt.Errorf("error patching podSpec: %w", err)
 	}
 
 	patchedPodSpec := corev1.PodSpec{}
 	err = json.Unmarshal(patchedJSON, &patchedPodSpec)
 	if err != nil {
-		return corev1.PodSpec{}, fmt.Errorf("error unmarshalling patched Stateful Set: %v", err)
+		return corev1.PodSpec{}, fmt.Errorf("error unmarshalling patched Stateful Set: %w", err)
 	}
 
 	rmqContainer := containerRabbitmq(podSpecOverride.Containers)
@@ -711,19 +717,20 @@ func setupContainer(instance *rabbitmqv1beta1.RabbitmqCluster) corev1.Container 
 	//Init Container resources
 	cpuRequest := k8sresource.MustParse(initContainerCPU)
 	memoryRequest := k8sresource.MustParse(initContainerMemory)
-
+	command := []string{
+		"sh", "-c",
+		"cp /tmp/erlang-cookie-secret/.erlang.cookie /var/lib/rabbitmq/.erlang.cookie " +
+			"&& chmod 600 /var/lib/rabbitmq/.erlang.cookie ; " +
+			"cp /tmp/rabbitmq-plugins/enabled_plugins /operator/enabled_plugins ; " +
+			"echo '[default]' > /var/lib/rabbitmq/.rabbitmqadmin.conf " +
+			"&& sed -e 's/default_user/username/' -e 's/default_pass/password/' %s >> /var/lib/rabbitmq/.rabbitmqadmin.conf " +
+			"&& chmod 600 /var/lib/rabbitmq/.rabbitmqadmin.conf ; " +
+			"sleep " + strconv.Itoa(int(pointer.Int32Deref(instance.Spec.DelayStartSeconds, 30))),
+	}
 	setupContainer := corev1.Container{
-		Name:  "setup-container",
-		Image: instance.Spec.Image,
-		Command: []string{
-			"sh", "-c",
-			"cp /tmp/erlang-cookie-secret/.erlang.cookie /var/lib/rabbitmq/.erlang.cookie " +
-				"&& chmod 600 /var/lib/rabbitmq/.erlang.cookie ; " +
-				"cp /tmp/rabbitmq-plugins/enabled_plugins /operator/enabled_plugins ; " +
-				"echo '[default]' > /var/lib/rabbitmq/.rabbitmqadmin.conf " +
-				"&& sed -e 's/default_user/username/' -e 's/default_pass/password/' %s >> /var/lib/rabbitmq/.rabbitmqadmin.conf " +
-				"&& chmod 600 /var/lib/rabbitmq/.rabbitmqadmin.conf",
-		},
+		Name:    "setup-container",
+		Image:   instance.Spec.Image,
+		Command: command,
 		Resources: corev1.ResourceRequirements{
 			Limits: corev1.ResourceList{
 				"cpu":    cpuRequest,

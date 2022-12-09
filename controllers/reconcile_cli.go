@@ -68,13 +68,13 @@ func (r *RabbitmqClusterReconciler) runRabbitmqCLICommandsIfAnnotated(ctx contex
 func (r *RabbitmqClusterReconciler) runEnableFeatureFlagsCommand(ctx context.Context, rmq *rabbitmqv1beta1.RabbitmqCluster, sts *appsv1.StatefulSet) error {
 	logger := ctrl.LoggerFrom(ctx)
 	podName := fmt.Sprintf("%s-0", rmq.ChildResourceName("server"))
-	cmd := "set -eo pipefail; rabbitmqctl -s list_feature_flags name state stability | (grep 'disabled\\sstable$' || true) | cut -f 1 | xargs -r -n1 rabbitmqctl enable_feature_flag"
+	cmd := "rabbitmqctl enable_feature_flag all"
 	stdout, stderr, err := r.exec(rmq.Namespace, podName, "rabbitmq", "bash", "-c", cmd)
 	if err != nil {
 		msg := "failed to enable all feature flags on pod"
 		logger.Error(err, msg, "pod", podName, "command", cmd, "stdout", stdout, "stderr", stderr)
 		r.Recorder.Event(rmq, corev1.EventTypeWarning, "FailedReconcile", fmt.Sprintf("%s %s", msg, podName))
-		return fmt.Errorf("%s %s: %v", msg, podName, err)
+		return fmt.Errorf("%s %s: %w", msg, podName, err)
 	}
 	logger.Info("successfully enabled all feature flags")
 	return r.deleteAnnotation(ctx, sts, stsCreateAnnotation)
@@ -95,7 +95,7 @@ func (r *RabbitmqClusterReconciler) runSetPluginsCommand(ctx context.Context, rm
 			msg := "failed to set plugins on pod"
 			logger.Error(err, msg, "pod", podName, "command", cmd, "stdout", stdout, "stderr", stderr)
 			r.Recorder.Event(rmq, corev1.EventTypeWarning, "FailedReconcile", fmt.Sprintf("%s %s", msg, podName))
-			return fmt.Errorf("%s %s: %v", msg, podName, err)
+			return fmt.Errorf("%s %s: %w", msg, podName, err)
 		}
 	}
 	logger.Info("successfully set plugins")
@@ -111,7 +111,7 @@ func (r *RabbitmqClusterReconciler) runQueueRebalanceCommand(ctx context.Context
 		msg := "failed to run queue rebalance on pod"
 		logger.Error(err, msg, "pod", podName, "command", cmd, "stdout", stdout, "stderr", stderr)
 		r.Recorder.Event(rmq, corev1.EventTypeWarning, "FailedReconcile", fmt.Sprintf("%s %s", msg, podName))
-		return fmt.Errorf("%s %s: %v", msg, podName, err)
+		return fmt.Errorf("%s %s: %w", msg, podName, err)
 	}
 	return r.deleteAnnotation(ctx, rmq, queueRebalanceAnnotation)
 }

@@ -11,6 +11,7 @@ package resource
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -27,14 +28,12 @@ import (
 const (
 	ServerConfigMapName = "server-conf"
 	defaultRabbitmqConf = `
-cluster_formation.peer_discovery_backend = rabbit_peer_discovery_k8s
-cluster_formation.k8s.host = kubernetes.default
-cluster_formation.k8s.address_type = hostname
-cluster_partition_handling = pause_minority
 queue_master_locator = min-masters
 disk_free_limit.absolute = 2GB
-cluster_formation.randomized_startup_delay_range.min = 0
-cluster_formation.randomized_startup_delay_range.max = 60`
+cluster_partition_handling = pause_minority
+cluster_formation.peer_discovery_backend = rabbit_peer_discovery_k8s
+cluster_formation.k8s.host = kubernetes.default
+cluster_formation.k8s.address_type = hostname`
 
 	defaultTLSConf = `
 ssl_options.certfile = /etc/rabbitmq-tls/tls.crt
@@ -90,6 +89,10 @@ func (builder *ServerConfigMapBuilder) Update(object client.Object) error {
 		return err
 	}
 	defaultSection := operatorConfiguration.Section("")
+
+	if _, err := defaultSection.NewKey("cluster_formation.target_cluster_size_hint", strconv.Itoa(int(*builder.Instance.Spec.Replicas))); err != nil {
+		return err
+	}
 
 	if _, err := defaultSection.NewKey("cluster_name", builder.Instance.Name); err != nil {
 		return err
@@ -240,7 +243,7 @@ func (builder *ServerConfigMapBuilder) Update(object client.Object) error {
 	updateProperty(configMap.Data, "rabbitmq-env.conf", rmqProperties.EnvConfig)
 
 	if err := controllerutil.SetControllerReference(builder.Instance, configMap, builder.Scheme); err != nil {
-		return fmt.Errorf("failed setting controller reference: %v", err)
+		return fmt.Errorf("failed setting controller reference: %w", err)
 	}
 
 	return nil

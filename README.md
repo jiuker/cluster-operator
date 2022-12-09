@@ -37,7 +37,7 @@ under `site/kubernetes`.
 
 ## Supported Versions
 
-The operator deploys RabbitMQ `3.10.2` by default, and supports versions from `3.8.8` upwards. The operator requires Kubernetes `1.19` or newer.
+The operator deploys RabbitMQ `3.10.2` by default, and supports versions from `3.9.9` upwards. The operator requires Kubernetes `1.19` or newer.
 
 ## Versioning
 
@@ -59,4 +59,6 @@ Please read [contribution guidelines](CONTRIBUTING.md) if you are interested in 
 
 ## Copyright
 
-Copyright 2020-2021 VMware, Inc. All Rights Reserved.
+Copyright 2020-2022 VMware, Inc. All Rights Reserved.
+
+[![Go Report Card](https://goreportcard.com/badge/github.com/rabbitmq/cluster-operator)](https://goreportcard.com/report/github.com/rabbitmq/cluster-operator)

@@ -16,6 +16,7 @@ resources:
 - role_binding.yaml
 - leader_election_role.yaml
 - leader_election_role_binding.yaml
+- service_binding_cluster_role.yaml
 
 patches:
 # the following patch file adds labels to the operator ClusterRole definition in role.yaml
