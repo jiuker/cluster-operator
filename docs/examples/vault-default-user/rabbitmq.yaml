@@ -3,7 +3,6 @@ kind: RabbitmqCluster
 metadata:
   name: vault-default-user
 spec:
-  replicas: 3
   secretBackend:
     vault:
       role: rabbitmq
@@ -12,3 +11,4 @@ spec:
       annotations:
         vault.hashicorp.com/template-static-secret-render-interval: "15s"
       defaultUserPath: secret/data/rabbitmq/config
+      defaultUserUpdaterImage: "ghcr.io/rabbitmq/default-user-credential-updater:1.0.14"

@@ -20,23 +20,25 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/intstr"
 
-	rabbitmqv1beta1 "github.com/rabbitmq/cluster-operator/api/v1beta1"
-	"github.com/rabbitmq/cluster-operator/internal/metadata"
+	"maps"
+
+	rabbitmqv1beta1 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
+	"github.com/rabbitmq/cluster-operator/v2/internal/metadata"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8sresource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 const (
 	stsSuffix           string = "server"
-	initContainerCPU    string = "100m"
-	initContainerMemory string = "500Mi"
+	initContainerCPU    string = "20m"
+	initContainerMemory string = "64Mi"
 	defaultPVCName      string = "persistence"
 	DeletionMarker      string = "skipPreStopChecks"
 )
@@ -103,7 +105,7 @@ func (builder *StatefulSetBuilder) Update(object client.Object) error {
 	//Update Strategy
 	sts.Spec.UpdateStrategy = appsv1.StatefulSetUpdateStrategy{
 		RollingUpdate: &appsv1.RollingUpdateStatefulSetStrategy{
-			Partition: pointer.Int32Ptr(0),
+			Partition: ptr.To(int32(0)),
 		},
 		Type: appsv1.RollingUpdateStatefulSetStrategyType,
 	}
@@ -191,6 +193,10 @@ func applyStsOverride(instance *rabbitmqv1beta1.RabbitmqCluster, scheme *runtime
 		}
 	}
 
+	if stsOverride.Spec.PersistentVolumeClaimRetentionPolicy != nil {
+		sts.Spec.PersistentVolumeClaimRetentionPolicy = stsOverride.Spec.PersistentVolumeClaimRetentionPolicy
+	}
+
 	if stsOverride.Spec.Template == nil {
 		return nil
 	}
@@ -222,7 +228,7 @@ func persistentVolumeClaim(instance *rabbitmqv1beta1.RabbitmqCluster, scheme *ru
 			Annotations: metadata.ReconcileAndFilterAnnotations(map[string]string{}, instance.Annotations),
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
-			Resources: corev1.ResourceRequirements{
+			Resources: corev1.VolumeResourceRequirements{
 				Requests: corev1.ResourceList{
 					corev1.ResourceStorage: *instance.Spec.Persistence.Storage,
 				},
@@ -244,7 +250,7 @@ func persistentVolumeClaim(instance *rabbitmqv1beta1.RabbitmqCluster, scheme *ru
 func disableBlockOwnerDeletion(pvc corev1.PersistentVolumeClaim) {
 	refs := pvc.OwnerReferences
 	for i := range refs {
-		refs[i].BlockOwnerDeletion = pointer.BoolPtr(false)
+		refs[i].BlockOwnerDeletion = ptr.To(false)
 	}
 }
 
@@ -282,7 +288,19 @@ func patchPodSpec(podSpec, podSpecOverride *corev1.PodSpec) (corev1.PodSpec, err
 		sortVolumeMounts(patchedPodSpec.Containers[0].VolumeMounts)
 	}
 
-	// A user may wish to override the controller-set securityContext for the RabbitMQ & init containers so that the
+	// allow overriding the liveness and readiness probes
+	// note: as of 2024, we don't set a default LivenessProbe
+	if rmqContainer.LivenessProbe != nil {
+		patchedPodSpec.Containers[0].LivenessProbe = rmqContainer.LivenessProbe
+	}
+	if rmqContainer.ReadinessProbe != nil {
+		patchedPodSpec.Containers[0].ReadinessProbe = rmqContainer.ReadinessProbe
+	}
+	if rmqContainer.StartupProbe != nil {
+		patchedPodSpec.Containers[0].StartupProbe = rmqContainer.StartupProbe
+	}
+
+	// A user may wish to override the controller-set securityContext for the RabbitMQ, init containers, and containers so that the
 	// container runtime can override them. If the securityContext has been set to an empty struct, `strategicpatch.StrategicMergePatch`
 	// won't pick this up, so manually override it here.
 	if podSpecOverride.SecurityContext != nil && reflect.DeepEqual(*podSpecOverride.SecurityContext, corev1.PodSecurityContext{}) {
@@ -291,6 +309,11 @@ func patchPodSpec(podSpec, podSpecOverride *corev1.PodSpec) (corev1.PodSpec, err
 	for i := range podSpecOverride.InitContainers {
 		if podSpecOverride.InitContainers[i].SecurityContext != nil && reflect.DeepEqual(*podSpecOverride.InitContainers[i].SecurityContext, corev1.SecurityContext{}) {
 			patchedPodSpec.InitContainers[i].SecurityContext = nil
+		}
+	}
+	for i := range podSpecOverride.Containers {
+		if podSpecOverride.Containers[i].SecurityContext != nil && reflect.DeepEqual(*podSpecOverride.Containers[i].SecurityContext, corev1.SecurityContext{}) {
+			patchedPodSpec.Containers[i].SecurityContext = nil
 		}
 	}
 
@@ -333,7 +356,7 @@ func sortVolumeMounts(mounts []corev1.VolumeMount) {
 
 func (builder *StatefulSetBuilder) podTemplateSpec(previousPodAnnotations map[string]string) corev1.PodTemplateSpec {
 	// default pod annotations
-	defaultPodAnnotations := make(map[string]string, 0)
+	defaultPodAnnotations := make(map[string]string)
 
 	if builder.Instance.VaultEnabled() {
 		defaultPodAnnotations = appendVaultAnnotations(defaultPodAnnotations, builder.Instance)
@@ -419,11 +442,13 @@ func (builder *StatefulSetBuilder) podTemplateSpec(previousPodAnnotations map[st
 		},
 	}
 
-	if !builder.Instance.VaultDefaultUserSecretEnabled() {
-		appendDefaultUserSecretVolumeProjection(volumes, builder.Instance)
+	if !builder.Instance.VaultDefaultUserSecretEnabled() && !builder.Instance.ExternalSecretEnabled() {
+		appendDefaultUserSecretVolumeProjection(volumes, builder.Instance, "")
+	} else if builder.Instance.ExternalSecretEnabled() {
+		appendDefaultUserSecretVolumeProjection(volumes, builder.Instance, builder.Instance.Spec.SecretBackend.ExternalSecret.Name)
 	}
 
-	if builder.Instance.Spec.Rabbitmq.AdvancedConfig != "" || builder.Instance.Spec.Rabbitmq.EnvConfig != "" {
+	if builder.rabbitmqConfigurationIsSet() {
 		volumes = append(volumes, corev1.Volume{
 			Name: "server-conf",
 			VolumeSource: corev1.VolumeSource{
@@ -435,12 +460,17 @@ func (builder *StatefulSetBuilder) podTemplateSpec(previousPodAnnotations map[st
 
 	zero := k8sresource.MustParse("0Gi")
 	if builder.Instance.Spec.Persistence.Storage.Cmp(zero) == 0 {
-		volumes = append(volumes, corev1.Volume{
+		volume := corev1.Volume{
 			Name: "persistence",
 			VolumeSource: corev1.VolumeSource{
 				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			},
-		})
+		}
+		if builder.Instance.Spec.Persistence.EmptyDir != nil {
+			volume.VolumeSource.EmptyDir.SizeLimit = builder.Instance.Spec.Persistence.EmptyDir.SizeLimit
+			volume.VolumeSource.EmptyDir.Medium = builder.Instance.Spec.Persistence.EmptyDir.Medium
+		}
+		volumes = append(volumes, volume)
 	}
 
 	rabbitmqContainerVolumeMounts := []corev1.VolumeMount{
@@ -490,6 +520,12 @@ func (builder *StatefulSetBuilder) podTemplateSpec(previousPodAnnotations map[st
 		})
 	}
 
+	if builder.Instance.Spec.Rabbitmq.ErlangInetConfig != "" {
+		rabbitmqContainerVolumeMounts = append(rabbitmqContainerVolumeMounts, corev1.VolumeMount{
+			Name: "server-conf", MountPath: "/etc/rabbitmq/erl_inetrc", SubPath: "erl_inetrc",
+		})
+	}
+
 	tlsSpec := builder.Instance.Spec.TLS
 	if builder.Instance.SecretTLSEnabled() {
 		rabbitmqContainerVolumeMounts = append(rabbitmqContainerVolumeMounts, corev1.VolumeMount{
@@ -499,7 +535,7 @@ func (builder *StatefulSetBuilder) podTemplateSpec(previousPodAnnotations map[st
 		})
 
 		secretEnforced := true
-		filePermissions := pointer.Int32Ptr(400)
+		filePermissions := ptr.To(int32(400))
 		tlsProjectedVolume := corev1.Volume{
 			Name: "rabbitmq-tls",
 			VolumeSource: corev1.VolumeSource{
@@ -511,6 +547,10 @@ func (builder *StatefulSetBuilder) podTemplateSpec(previousPodAnnotations map[st
 									Name: tlsSpec.SecretName,
 								},
 								Optional: &secretEnforced,
+								Items: []corev1.KeyToPath{
+									{Key: "tls.crt", Path: "tls.crt"},
+									{Key: "tls.key", Path: "tls.key"},
+								},
 							},
 						},
 					},
@@ -519,14 +559,17 @@ func (builder *StatefulSetBuilder) podTemplateSpec(previousPodAnnotations map[st
 			},
 		}
 
-		if builder.Instance.MutualTLSEnabled() && !builder.Instance.SingleTLSSecret() {
+		if builder.Instance.MutualTLSEnabled() {
 			caSecretProjection := corev1.VolumeProjection{
 				Secret: &corev1.SecretProjection{
 					LocalObjectReference: corev1.LocalObjectReference{Name: tlsSpec.CaSecretName},
 					Optional:             &secretEnforced,
+					Items: []corev1.KeyToPath{
+						{Key: "ca.crt", Path: "ca.crt"},
+					},
 				},
 			}
-			tlsProjectedVolume.VolumeSource.Projected.Sources = append(tlsProjectedVolume.VolumeSource.Projected.Sources, caSecretProjection)
+			tlsProjectedVolume.Projected.Sources = append(tlsProjectedVolume.Projected.Sources, caSecretProjection)
 		}
 
 		volumes = append(volumes, tlsProjectedVolume)
@@ -539,27 +582,17 @@ func (builder *StatefulSetBuilder) podTemplateSpec(previousPodAnnotations map[st
 			Labels:      metadata.Label(builder.Instance.Name),
 		},
 		Spec: corev1.PodSpec{
-			TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
-				{
-					MaxSkew: 1,
-					// "topology.kubernetes.io/zone" is a well-known label.
-					// It is automatically set by kubelet if the cloud provider provides the zone information.
-					// See: https://kubernetes.io/docs/reference/kubernetes-api/labels-annotations-taints/#topologykubernetesiozone
-					TopologyKey:       "topology.kubernetes.io/zone",
-					WhenUnsatisfiable: corev1.ScheduleAnyway,
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: metadata.LabelSelector(builder.Instance.Name),
-					},
-				},
-			},
+			TopologySpreadConstraints: builder.defaultTopologySpreadConstraints(),
 			SecurityContext: &corev1.PodSecurityContext{
-				FSGroup:   pointer.Int64(0),
-				RunAsUser: &rabbitmqUID,
+				FSGroup:      ptr.To(int64(0)),
+				RunAsUser:    &rabbitmqUID,
+				RunAsNonRoot: ptr.To(bool(true)),
+				SeccompProfile: &corev1.SeccompProfile{
+					Type: corev1.SeccompProfileTypeRuntimeDefault,
+				},
 			},
 			ImagePullSecrets:              builder.Instance.Spec.ImagePullSecrets,
 			TerminationGracePeriodSeconds: builder.Instance.Spec.TerminationGracePeriodSeconds,
-			ServiceAccountName:            builder.Instance.ChildResourceName(serviceAccountName),
-			AutomountServiceAccountToken:  pointer.Bool(true),
 			Affinity:                      builder.Instance.Spec.Affinity,
 			Tolerations:                   builder.Instance.Spec.Tolerations,
 			InitContainers:                []corev1.Container{setupContainer(builder.Instance)},
@@ -608,19 +641,44 @@ func (builder *StatefulSetBuilder) podTemplateSpec(previousPodAnnotations map[st
 						SuccessThreshold:    1,
 						FailureThreshold:    3,
 					},
+					// TODO: Update this probe once we have an HTTP API endpoint for this
+					StartupProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							Exec: &corev1.ExecAction{
+								Command: []string{"/bin/bash", "-c",
+									"rabbitmqctl eval 'rabbit_nodes:reached_target_cluster_size().' | grep -q '^true$'"},
+							},
+						},
+						InitialDelaySeconds: 10,
+						TimeoutSeconds:      5,
+						PeriodSeconds:       10,
+						FailureThreshold:    30,
+					},
 					Lifecycle: &corev1.Lifecycle{
 						PreStop: &corev1.LifecycleHandler{
 							Exec: &corev1.ExecAction{
 								Command: []string{"/bin/bash", "-c",
 									fmt.Sprintf("if [ ! -z \"$(cat /etc/pod-info/%s)\" ]; then exit 0; fi;", DeletionMarker) +
-										fmt.Sprintf(" rabbitmq-upgrade await_online_quorum_plus_one -t %d;"+
-											" rabbitmq-upgrade await_online_synchronized_mirror -t %d;"+
+										fmt.Sprintf(" rabbitmq-upgrade await_online_quorum_plus_one -t %d &&"+
+											" rabbitmq-upgrade await_online_synchronized_mirror -t %d || true &&"+
 											" rabbitmq-upgrade drain -t %d",
 											*builder.Instance.Spec.TerminationGracePeriodSeconds,
 											*builder.Instance.Spec.TerminationGracePeriodSeconds,
 											*builder.Instance.Spec.TerminationGracePeriodSeconds),
 								},
 							},
+						},
+					},
+					SecurityContext: &corev1.SecurityContext{
+						AllowPrivilegeEscalation: ptr.To(bool(false)),
+						Capabilities: &corev1.Capabilities{
+							Drop: []corev1.Capability{"ALL"},
+						},
+						ReadOnlyRootFilesystem: ptr.To(bool(true)),
+						RunAsNonRoot:           ptr.To((bool(true))),
+						Privileged:             ptr.To(bool(false)),
+						SeccompProfile: &corev1.SeccompProfile{
+							Type: corev1.SeccompProfileTypeRuntimeDefault,
 						},
 					},
 				},
@@ -633,7 +691,17 @@ func (builder *StatefulSetBuilder) podTemplateSpec(previousPodAnnotations map[st
 		podTemplateSpec.Spec.Containers = append(podTemplateSpec.Spec.Containers,
 			defaultUserCredentialUpdater(builder.Instance))
 	}
+
+	podTemplateSpec.Spec.ServiceAccountName = builder.Instance.ChildResourceName(serviceAccountName)
+	podTemplateSpec.Spec.AutomountServiceAccountToken = ptr.To(true)
+
 	return podTemplateSpec
+}
+
+func (builder *StatefulSetBuilder) rabbitmqConfigurationIsSet() bool {
+	return builder.Instance.Spec.Rabbitmq.AdvancedConfig != "" ||
+		builder.Instance.Spec.Rabbitmq.EnvConfig != "" ||
+		builder.Instance.Spec.Rabbitmq.ErlangInetConfig != ""
 }
 
 func defaultUserCredentialUpdater(instance *rabbitmqv1beta1.RabbitmqCluster) corev1.Container {
@@ -725,7 +793,7 @@ func setupContainer(instance *rabbitmqv1beta1.RabbitmqCluster) corev1.Container 
 			"echo '[default]' > /var/lib/rabbitmq/.rabbitmqadmin.conf " +
 			"&& sed -e 's/default_user/username/' -e 's/default_pass/password/' %s >> /var/lib/rabbitmq/.rabbitmqadmin.conf " +
 			"&& chmod 600 /var/lib/rabbitmq/.rabbitmqadmin.conf ; " +
-			"sleep " + strconv.Itoa(int(pointer.Int32Deref(instance.Spec.DelayStartSeconds, 30))),
+			"sleep " + strconv.Itoa(int(ptr.Deref(instance.Spec.DelayStartSeconds, 30))),
 	}
 	setupContainer := corev1.Container{
 		Name:    "setup-container",
@@ -763,6 +831,18 @@ func setupContainer(instance *rabbitmqv1beta1.RabbitmqCluster) corev1.Container 
 				MountPath: "/var/lib/rabbitmq/mnesia/",
 			},
 		},
+		SecurityContext: &corev1.SecurityContext{
+			AllowPrivilegeEscalation: ptr.To(bool(false)),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
+			Privileged:             ptr.To(bool(false)),
+			ReadOnlyRootFilesystem: ptr.To(bool(true)),
+			RunAsNonRoot:           ptr.To(bool(true)),
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: corev1.SeccompProfileTypeRuntimeDefault,
+			},
+		},
 	}
 
 	if instance.VaultDefaultUserSecretEnabled() {
@@ -779,14 +859,19 @@ func setupContainer(instance *rabbitmqv1beta1.RabbitmqCluster) corev1.Container 
 	return setupContainer
 }
 
-func appendDefaultUserSecretVolumeProjection(volumes []corev1.Volume, instance *rabbitmqv1beta1.RabbitmqCluster) {
+func appendDefaultUserSecretVolumeProjection(volumes []corev1.Volume, instance *rabbitmqv1beta1.RabbitmqCluster, secretName string) {
+
+	if secretName == "" {
+		secretName = instance.ChildResourceName(DefaultUserSecretName)
+	}
+
 	for _, value := range volumes {
 		if value.Name == "rabbitmq-confd" {
-			value.VolumeSource.Projected.Sources = append(value.VolumeSource.Projected.Sources,
+			value.Projected.Sources = append(value.Projected.Sources,
 				corev1.VolumeProjection{
 					Secret: &corev1.SecretProjection{
 						LocalObjectReference: corev1.LocalObjectReference{
-							Name: instance.ChildResourceName(DefaultUserSecretName),
+							Name: secretName,
 						},
 						Items: []corev1.KeyToPath{
 							{
@@ -837,15 +922,15 @@ default_pass = {{ .Data.data.password }}
 		certDir := strings.TrimSuffix(tlsCertDir, "/")
 		vaultAnnotations["vault.hashicorp.com/secret-volume-path-"+tlsCertFilename] = certDir
 		vaultAnnotations["vault.hashicorp.com/agent-inject-secret-"+tlsCertFilename] = pathCert
-		vaultAnnotations["vault.hashicorp.com/agent-inject-template-"+tlsCertFilename] = generateVaultTLSTemplate(commonName, altNames, vault, "certificate")
+		vaultAnnotations["vault.hashicorp.com/agent-inject-template-"+tlsCertFilename] = generateVaultTLSCertificateTemplate(commonName, altNames, vault)
 
 		vaultAnnotations["vault.hashicorp.com/secret-volume-path-"+tlsKeyFilename] = certDir
 		vaultAnnotations["vault.hashicorp.com/agent-inject-secret-"+tlsKeyFilename] = pathCert
-		vaultAnnotations["vault.hashicorp.com/agent-inject-template-"+tlsKeyFilename] = generateVaultTLSTemplate(commonName, altNames, vault, "private_key")
+		vaultAnnotations["vault.hashicorp.com/agent-inject-template-"+tlsKeyFilename] = generateVaultTLSTemplate(commonName, altNames, vault.TLS.PKIIssuerPath, vault.TLS.IpSans, "private_key")
 
 		vaultAnnotations["vault.hashicorp.com/secret-volume-path-"+caCertFilename] = certDir
 		vaultAnnotations["vault.hashicorp.com/agent-inject-secret-"+caCertFilename] = pathCert
-		vaultAnnotations["vault.hashicorp.com/agent-inject-template-"+caCertFilename] = generateVaultTLSTemplate(commonName, altNames, vault, "issuing_ca")
+		vaultAnnotations["vault.hashicorp.com/agent-inject-template-"+caCertFilename] = generateVaultCATemplate(commonName, altNames, vault)
 	}
 
 	return metadata.ReconcileAnnotations(currentAnnotations, vaultAnnotations, vault.Annotations)
@@ -854,17 +939,43 @@ default_pass = {{ .Data.data.password }}
 func podHostNames(instance *rabbitmqv1beta1.RabbitmqCluster) string {
 	altNames := ""
 	var i int32
-	for i = 0; i < pointer.Int32PtrDerefOr(instance.Spec.Replicas, 1); i++ {
+	for i = range ptr.Deref(instance.Spec.Replicas, 1) {
 		altNames += fmt.Sprintf(",%s", fmt.Sprintf("%s-%d.%s.%s", instance.ChildResourceName(stsSuffix), i, instance.ChildResourceName(headlessServiceSuffix), instance.Namespace))
 	}
 	return strings.TrimPrefix(altNames, ",")
 }
 
-func generateVaultTLSTemplate(commonName, altNames string, vault *rabbitmqv1beta1.VaultSpec, tlsAttribute string) string {
+func generateVaultTLSTemplate(commonName, altNames string, vaultPath string, ipSans string, tlsAttribute string) string {
 	return fmt.Sprintf(`
 {{- with secret "%s" "common_name=%s" "alt_names=%s" "ip_sans=%s" -}}
 {{ .Data.%s }}
-{{- end }}`, vault.TLS.PKIIssuerPath, commonName, altNames, vault.TLS.IpSans, tlsAttribute)
+{{- end }}`, vaultPath, commonName, altNames, ipSans, tlsAttribute)
+}
+
+func generateVaultCATemplate(commonName, altNames string, vault *rabbitmqv1beta1.VaultSpec) string {
+	if vault.TLS.PKIRootPath == "" {
+		return generateVaultTLSTemplate(commonName, altNames, vault.TLS.PKIIssuerPath, vault.TLS.IpSans, "issuing_ca")
+	} else {
+		return fmt.Sprintf(`
+{{- with secret "%s" -}}
+{{ .Data.certificate }}
+{{- end }}`, vault.TLS.PKIRootPath)
+	}
+}
+
+func generateVaultTLSCertificateTemplate(commonName, altNames string, vault *rabbitmqv1beta1.VaultSpec) string {
+	return fmt.Sprintf(`
+{{- with secret "%s" "common_name=%s" "alt_names=%s" "ip_sans=%s" -}}
+{{ .Data.certificate }}
+{{- if .Data.ca_chain -}}
+{{- $lastintermediatecertindex := len .Data.ca_chain | subtract 1 -}}
+{{ range $index, $cacert := .Data.ca_chain }}
+{{ if (lt $index $lastintermediatecertindex) }}
+{{ $cacert }}
+{{ end }}
+{{ end }}
+{{- end -}}
+{{- end -}}`, vault.TLS.PKIIssuerPath, commonName, altNames, vault.TLS.IpSans)
 }
 
 func (builder *StatefulSetBuilder) updateContainerPorts() []corev1.ContainerPort {
@@ -915,6 +1026,12 @@ func (builder *StatefulSetBuilder) updateContainerPorts() []corev1.ContainerPort
 			ContainerPort: 15674,
 		})
 	}
+	if builder.Instance.AdditionalPluginEnabled("rabbitmq_web_amqp") {
+		ports = append(ports, corev1.ContainerPort{
+			Name:          "web-amqp",
+			ContainerPort: 15678,
+		})
+	}
 
 	if builder.Instance.StreamNeeded() {
 		ports = append(ports, corev1.ContainerPort{
@@ -960,20 +1077,25 @@ func (builder *StatefulSetBuilder) updateContainerPorts() []corev1.ContainerPort
 			})
 		}
 
-		if builder.Instance.MutualTLSEnabled() {
-			if builder.Instance.AdditionalPluginEnabled("rabbitmq_web_mqtt") {
-				ports = append(ports, corev1.ContainerPort{
-					Name:          "web-mqtt-tls",
-					ContainerPort: 15676,
-				})
-			}
+		if builder.Instance.AdditionalPluginEnabled("rabbitmq_web_mqtt") {
+			ports = append(ports, corev1.ContainerPort{
+				Name:          "web-mqtt-tls",
+				ContainerPort: 15676,
+			})
+		}
 
-			if builder.Instance.AdditionalPluginEnabled("rabbitmq_web_stomp") {
-				ports = append(ports, corev1.ContainerPort{
-					Name:          "web-stomp-tls",
-					ContainerPort: 15673,
-				})
-			}
+		if builder.Instance.AdditionalPluginEnabled("rabbitmq_web_stomp") {
+			ports = append(ports, corev1.ContainerPort{
+				Name:          "web-stomp-tls",
+				ContainerPort: 15673,
+			})
+		}
+
+		if builder.Instance.AdditionalPluginEnabled("rabbitmq_web_amqp") {
+			ports = append(ports, corev1.ContainerPort{
+				Name:          "web-amqp-tls",
+				ContainerPort: 15677,
+			})
 		}
 	}
 
@@ -1021,22 +1143,28 @@ func (builder *StatefulSetBuilder) updateContainerPortsOnlyTLSListeners() []core
 		})
 	}
 
-	if builder.Instance.MutualTLSEnabled() {
-		if builder.Instance.AdditionalPluginEnabled("rabbitmq_web_mqtt") {
-			ports = append(ports, corev1.ContainerPort{
-				Name:          "web-mqtt-tls",
-				ContainerPort: 15676,
-			})
-		}
-
-		if builder.Instance.AdditionalPluginEnabled("rabbitmq_web_stomp") {
-			ports = append(ports, corev1.ContainerPort{
-				Name:          "web-stomp-tls",
-				ContainerPort: 15673,
-			})
-		}
-	}
 	return ports
+}
+
+func (builder *StatefulSetBuilder) defaultTopologySpreadConstraints() []corev1.TopologySpreadConstraint {
+
+	if builder.Instance.DisableDefaultTopologySpreadConstraints() {
+		return []corev1.TopologySpreadConstraint{}
+	}
+
+	return []corev1.TopologySpreadConstraint{
+		{
+			MaxSkew: 1,
+			// "topology.kubernetes.io/zone" is a well-known label.
+			// It is automatically set by kubelet if the cloud provider provides the zone information.
+			// See: https://kubernetes.io/docs/reference/kubernetes-api/labels-annotations-taints/#topologykubernetesiozone
+			TopologyKey:       "topology.kubernetes.io/zone",
+			WhenUnsatisfiable: corev1.ScheduleAnyway,
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: metadata.LabelSelector(builder.Instance.Name),
+			},
+		},
+	}
 }
 
 func copyLabelsAnnotations(base *metav1.ObjectMeta, override rabbitmqv1beta1.EmbeddedLabelsAnnotations) {
@@ -1071,9 +1199,7 @@ func mergeMap(base, override map[string]string) map[string]string {
 		result = make(map[string]string)
 	}
 
-	for k, v := range override {
-		result[k] = v
-	}
+	maps.Copy(result, override)
 
 	return result
 }

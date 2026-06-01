@@ -10,13 +10,16 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  creationTimestamp: null
-  name: operator-role
+  name: rabbitmq-cluster-operator-role
 rules:
 - apiGroups:
   - ""
   resources:
   - configmaps
+  - persistentvolumeclaims
+  - secrets
+  - serviceaccounts
+  - services
   verbs:
   - create
   - get
@@ -42,16 +45,6 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - persistentvolumeclaims
-  verbs:
-  - create
-  - get
-  - list
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
   - pods
   verbs:
   - get
@@ -65,36 +58,6 @@ rules:
   verbs:
   - create
 - apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - create
-  - get
-  - list
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - serviceaccounts
-  verbs:
-  - create
-  - get
-  - list
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - services
-  verbs:
-  - create
-  - get
-  - list
-  - update
-  - watch
-- apiGroups:
   - apps
   resources:
   - statefulsets
@@ -104,6 +67,14 @@ rules:
   - get
   - list
   - update
+  - watch
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - rabbitmq.com
@@ -127,23 +98,16 @@ rules:
   - rabbitmqclusters/status
   verbs:
   - get
+  - patch
   - update
 - apiGroups:
   - rbac.authorization.k8s.io
   resources:
   - rolebindings
-  verbs:
-  - create
-  - get
-  - list
-  - update
-  - watch
-- apiGroups:
-  - rbac.authorization.k8s.io
-  resources:
   - roles
   verbs:
   - create
+  - delete
   - get
   - list
   - update

@@ -12,15 +12,59 @@ package resource_test
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	rabbitmqv1beta1 "github.com/rabbitmq/cluster-operator/api/v1beta1"
-	"github.com/rabbitmq/cluster-operator/internal/resource"
-	. "github.com/rabbitmq/cluster-operator/internal/resource"
+	rabbitmqv1beta1 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
+	"github.com/rabbitmq/cluster-operator/v2/internal/resource"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	defaultscheme "k8s.io/client-go/kubernetes/scheme"
 )
 
 var _ = Describe("RabbitmqResourceBuilder", func() {
+	Context("ShouldCreatePeerDiscoveryRBAC", func() {
+		It("returns true if version is not annotated", func() {
+			rmq := &rabbitmqv1beta1.RabbitmqCluster{
+				ObjectMeta: v1.ObjectMeta{Annotations: map[string]string{}},
+			}
+			Expect(resource.ShouldCreatePeerDiscoveryRBAC(rmq)).To(BeTrueBecause("fallback to old behavior when version is not annotated"))
+		})
+
+		It("returns true if version cannot be parsed", func() {
+			rmq := &rabbitmqv1beta1.RabbitmqCluster{
+				ObjectMeta: v1.ObjectMeta{Annotations: map[string]string{
+					rabbitmqv1beta1.RabbitmqVersionAnnotation: "invalid",
+				}},
+			}
+			Expect(resource.ShouldCreatePeerDiscoveryRBAC(rmq)).To(BeTrueBecause("fallback to old behavior when version cannot be parsed"))
+		})
+
+		It("returns true if version is less than 4.1.0", func() {
+			rmq := &rabbitmqv1beta1.RabbitmqCluster{
+				ObjectMeta: v1.ObjectMeta{Annotations: map[string]string{
+					rabbitmqv1beta1.RabbitmqVersionAnnotation: "3.13.0",
+				}},
+			}
+			Expect(resource.ShouldCreatePeerDiscoveryRBAC(rmq)).To(BeTrueBecause("version is less than 4.1.0"))
+
+			rmq.Annotations[rabbitmqv1beta1.RabbitmqVersionAnnotation] = "4.0.0"
+			Expect(resource.ShouldCreatePeerDiscoveryRBAC(rmq)).To(BeTrueBecause("version is less than 4.1.0"))
+		})
+
+		It("returns false if version is 4.1.0 or greater", func() {
+			rmq := &rabbitmqv1beta1.RabbitmqCluster{
+				ObjectMeta: v1.ObjectMeta{Annotations: map[string]string{
+					rabbitmqv1beta1.RabbitmqVersionAnnotation: "4.1.0",
+				}},
+			}
+			Expect(resource.ShouldCreatePeerDiscoveryRBAC(rmq)).To(BeFalseBecause("peer-discovery RBAC is no longer required for 4.1.0 or greater"))
+
+			rmq.Annotations[rabbitmqv1beta1.RabbitmqVersionAnnotation] = "4.1.5"
+			Expect(resource.ShouldCreatePeerDiscoveryRBAC(rmq)).To(BeFalseBecause("peer-discovery RBAC is no longer required for 4.1.0 or greater"))
+
+			rmq.Annotations[rabbitmqv1beta1.RabbitmqVersionAnnotation] = "4.2.0"
+			Expect(resource.ShouldCreatePeerDiscoveryRBAC(rmq)).To(BeFalseBecause("peer-discovery RBAC is no longer required for 4.1.0 or greater"))
+		})
+	})
+
 	Context("ResourceBuilders", func() {
 		var (
 			instance *rabbitmqv1beta1.RabbitmqCluster
@@ -49,17 +93,17 @@ var _ = Describe("RabbitmqResourceBuilder", func() {
 
 			Expect(resourceBuilders).To(HaveLen(10))
 
-			expectedBuildersInOrder := []ResourceBuilder{
-				&HeadlessServiceBuilder{},
-				&ServiceBuilder{},
-				&ErlangCookieBuilder{},
-				&DefaultUserSecretBuilder{},
-				&RabbitmqPluginsConfigMapBuilder{},
-				&ServerConfigMapBuilder{},
-				&ServiceAccountBuilder{},
-				&RoleBuilder{},
-				&RoleBindingBuilder{},
-				&StatefulSetBuilder{},
+			expectedBuildersInOrder := []resource.ResourceBuilder{
+				&resource.HeadlessServiceBuilder{},
+				&resource.ServiceBuilder{},
+				&resource.ErlangCookieBuilder{},
+				&resource.DefaultUserSecretBuilder{},
+				&resource.RabbitmqPluginsConfigMapBuilder{},
+				&resource.ServerConfigMapBuilder{},
+				&resource.ServiceAccountBuilder{},
+				&resource.RoleBuilder{},
+				&resource.RoleBindingBuilder{},
+				&resource.StatefulSetBuilder{},
 			}
 
 			for i, resourceBuilder := range resourceBuilders {
@@ -77,7 +121,22 @@ var _ = Describe("RabbitmqResourceBuilder", func() {
 			It("returns all resource builders except for defaultUser K8s Secret", func() {
 				resourceBuilders := builder.ResourceBuilders()
 				Expect(resourceBuilders).To(HaveLen(9))
-				Expect(resourceBuilders).NotTo(ContainElement(BeAssignableToTypeOf(&DefaultUserSecretBuilder{})))
+				Expect(resourceBuilders).NotTo(ContainElement(BeAssignableToTypeOf(&resource.DefaultUserSecretBuilder{})))
+			})
+		})
+
+		When("RabbitMQ version is 4.1.0 or greater", func() {
+			BeforeEach(func() {
+				instance.Annotations = map[string]string{
+					rabbitmqv1beta1.RabbitmqVersionAnnotation: "4.1.0",
+				}
+			})
+			It("returns all resource builders except for peer-discovery Role and RoleBinding", func() {
+				resourceBuilders := builder.ResourceBuilders()
+				Expect(resourceBuilders).To(HaveLen(8))
+				Expect(resourceBuilders).To(ContainElement(BeAssignableToTypeOf(&resource.ServiceAccountBuilder{})))
+				Expect(resourceBuilders).NotTo(ContainElement(BeAssignableToTypeOf(&resource.RoleBuilder{})))
+				Expect(resourceBuilders).NotTo(ContainElement(BeAssignableToTypeOf(&resource.RoleBindingBuilder{})))
 			})
 		})
 	})

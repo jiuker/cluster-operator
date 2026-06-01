@@ -1,0 +1,36 @@
+package controllers
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	ctrl "sigs.k8s.io/controller-runtime"
+
+	"github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
+	"github.com/rabbitmq/cluster-operator/v2/internal/status"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+// cluster scale down not supported
+// log error, publish warning event, and set ReconcileSuccess to false when scale down request detected
+func (r *RabbitmqClusterReconciler) scaleDown(ctx context.Context, cluster *v1beta1.RabbitmqCluster, current, sts *appsv1.StatefulSet) bool {
+	logger := ctrl.LoggerFrom(ctx)
+
+	currentReplicas := *current.Spec.Replicas
+	desiredReplicas := *sts.Spec.Replicas
+	if currentReplicas > desiredReplicas {
+		msg := fmt.Sprintf("Cluster Scale down not supported; tried to scale cluster from %d nodes to %d nodes", currentReplicas, desiredReplicas)
+		reason := "UnsupportedOperation"
+		logger.Error(errors.New(reason), msg)
+		r.Recorder.Event(cluster, corev1.EventTypeWarning, reason, msg)
+		patch := client.MergeFrom(cluster.DeepCopy())
+		cluster.Status.SetCondition(status.ReconcileSuccess, corev1.ConditionFalse, reason, msg)
+		if statusErr := r.Status().Patch(ctx, cluster, patch); statusErr != nil {
+			logger.Error(statusErr, "Failed to patch ReconcileSuccess condition state")
+		}
+		return true
+	}
+	return false
+}

@@ -1,5 +1,7 @@
+ARG GO_TAG=1.26
+ARG DOCKER_REGISTRY=docker.io
 # Build the manager binary
-FROM golang:1.19 as builder
+FROM --platform=$BUILDPLATFORM ${DOCKER_REGISTRY}/library/golang:${GO_TAG} AS builder
 
 WORKDIR /workspace
 
@@ -9,17 +11,27 @@ COPY go.sum go.sum
 RUN go mod download
 
 # Copy the go source
-COPY main.go main.go
+COPY cmd/ cmd/
 COPY api/ api/
-COPY controllers/ controllers/
 COPY internal/ internal/
 COPY pkg/ pkg/
 
 # Build
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GO111MODULE=on go build -a -tags timetzdata -o manager main.go
+ARG TARGETOS
+ARG TARGETARCH
+ENV GOOS=$TARGETOS
+ENV GOARCH=$TARGETARCH
+
+# FIPS
+ARG FIPS_MODE=off
+ENV GOFIPS140=$FIPS_MODE
+
+RUN CGO_ENABLED=0 GO111MODULE=on go build -a -tags timetzdata -o manager ./cmd
 
 # ---------------------------------------
-FROM alpine:latest as etc-builder
+ARG DOCKER_REGISTRY=docker.io
+FROM ${DOCKER_REGISTRY}/library/alpine:latest AS etc-builder
+
 
 RUN echo "rabbitmq-cluster-operator:x:1000:" > /etc/group && \
     echo "rabbitmq-cluster-operator:x:1000:1000::/home/rabbitmq-cluster-operator:/usr/sbin/nologin" > /etc/passwd

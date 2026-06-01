@@ -17,12 +17,14 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	"github.com/rabbitmq/cluster-operator/internal/metadata"
+	"github.com/rabbitmq/cluster-operator/v2/internal/metadata"
 	"gopkg.in/ini.v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/rabbitmq/cluster-operator/api/v1beta1"
+	"slices"
+
+	"github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
 )
 
 const (
@@ -40,15 +42,40 @@ func (builder *RabbitmqResourceBuilder) DefaultUserSecret() *DefaultUserSecretBu
 	return &DefaultUserSecretBuilder{builder}
 }
 
+// Build creates a Secret for the default RabbitMQ user.
+// If default_user and/or default_pass are specified in spec.rabbitmq.additionalConfig,
+// those values are used. Otherwise, credentials are randomly generated.
 func (builder *DefaultUserSecretBuilder) Build() (client.Object, error) {
-	username, err := generateUsername(24)
-	if err != nil {
-		return nil, err
+	var username, password string
+	additionalConfig := builder.Instance.Spec.Rabbitmq.AdditionalConfig
+	if additionalConfig != "" {
+		cfg, err := ini.Load([]byte(additionalConfig))
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse additionalConfig: %w", err)
+		}
+		defaultSection := cfg.Section("")
+		if defaultSection.HasKey("default_user") {
+			username = defaultSection.Key("default_user").String()
+		}
+		if defaultSection.HasKey("default_pass") {
+			password = defaultSection.Key("default_pass").String()
+		}
 	}
 
-	password, err := randomEncodedString(24)
-	if err != nil {
-		return nil, err
+	if username == "" {
+		generatedUsername, err := generateUsername(24)
+		if err != nil {
+			return nil, err
+		}
+		username = generatedUsername
+	}
+
+	if password == "" {
+		generatedPassword, err := randomEncodedString(24)
+		if err != nil {
+			return nil, err
+		}
+		password = generatedPassword
 	}
 
 	defaultUserConf, err := generateDefaultUserConf(username, password)
@@ -74,6 +101,7 @@ func (builder *DefaultUserSecretBuilder) Build() (client.Object, error) {
 		},
 	}
 	builder.updatePorts(secret)
+	builder.updateConnectionString(secret)
 
 	return secret, nil
 }
@@ -87,6 +115,7 @@ func (builder *DefaultUserSecretBuilder) Update(object client.Object) error {
 	secret.Labels = metadata.GetLabels(builder.Instance.Name, builder.Instance.Labels)
 	secret.Annotations = metadata.ReconcileAndFilterAnnotations(secret.GetAnnotations(), builder.Instance.Annotations)
 	builder.updatePorts(secret)
+	builder.updateConnectionString(secret)
 
 	if err := controllerutil.SetControllerReference(builder.Instance, secret, builder.Scheme); err != nil {
 		return fmt.Errorf("failed setting controller reference: %w", err)
@@ -106,6 +135,7 @@ func (builder *DefaultUserSecretBuilder) updatePorts(secret *corev1.Secret) {
 		"rabbitmq_stream":    "stream-port",
 		"rabbitmq_web_mqtt":  "web-mqtt-port",
 		"rabbitmq_web_stomp": "web-stomp-port",
+		"rabbitmq_web_amqp":  "web-amqp-port",
 	}
 	TLSPort := map[string]string{
 		"mqtt-port":      "8883",
@@ -113,6 +143,7 @@ func (builder *DefaultUserSecretBuilder) updatePorts(secret *corev1.Secret) {
 		"stream-port":    "5551",
 		"web-mqtt-port":  "15676",
 		"web-stomp-port": "15673",
+		"web-amqp-port":  "15677",
 	}
 	port := map[string]string{
 		"mqtt-port":      "1883",
@@ -120,6 +151,7 @@ func (builder *DefaultUserSecretBuilder) updatePorts(secret *corev1.Secret) {
 		"stream-port":    "5552",
 		"web-mqtt-port":  "15675",
 		"web-stomp-port": "15674",
+		"web-amqp-port":  "15678",
 	}
 
 	if builder.Instance.Spec.TLS.SecretName != "" {
@@ -145,6 +177,14 @@ func (builder *DefaultUserSecretBuilder) updatePorts(secret *corev1.Secret) {
 	}
 }
 
+func (builder *DefaultUserSecretBuilder) updateConnectionString(secret *corev1.Secret) {
+	if builder.Instance.Spec.TLS.SecretName != "" {
+		secret.Data["connection_string"] = fmt.Appendf(nil, "amqps://%s:%s@%s:%s/", secret.Data["username"], secret.Data["password"], secret.Data["host"], secret.Data["port"])
+	} else {
+		secret.Data["connection_string"] = fmt.Appendf(nil, "amqp://%s:%s@%s:%s/", secret.Data["username"], secret.Data["password"], secret.Data["host"], secret.Data["port"])
+	}
+}
+
 // generateUsername returns a base64 string that has "default_user_" as prefix
 // returned string has length 'l' when base64 decoded
 func generateUsername(l int) (string, error) {
@@ -158,12 +198,7 @@ func generateUsername(l int) (string, error) {
 }
 
 func (builder *DefaultUserSecretBuilder) pluginEnabled(plugin v1beta1.Plugin) bool {
-	for _, value := range builder.Instance.Spec.Rabbitmq.AdditionalPlugins {
-		if value == plugin {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(builder.Instance.Spec.Rabbitmq.AdditionalPlugins, plugin)
 }
 
 func generateDefaultUserConf(username, password string) ([]byte, error) {

@@ -11,14 +11,15 @@ package resource_test
 
 import (
 	b64 "encoding/base64"
+	"fmt"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	rabbitmqv1beta1 "github.com/rabbitmq/cluster-operator/api/v1beta1"
-	"github.com/rabbitmq/cluster-operator/internal/resource"
+	rabbitmqv1beta1 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
+	"github.com/rabbitmq/cluster-operator/v2/internal/resource"
 	"gopkg.in/ini.v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	defaultscheme "k8s.io/client-go/kubernetes/scheme"
 )
@@ -37,7 +38,7 @@ var _ = Describe("DefaultUserSecret", func() {
 		Expect(rabbitmqv1beta1.AddToScheme(scheme)).To(Succeed())
 		Expect(defaultscheme.AddToScheme(scheme)).To(Succeed())
 		instance = rabbitmqv1beta1.RabbitmqCluster{
-			ObjectMeta: v1.ObjectMeta{
+			ObjectMeta: metav1.ObjectMeta{
 				Name:      "a name",
 				Namespace: "a namespace",
 			},
@@ -100,6 +101,16 @@ var _ = Describe("DefaultUserSecret", func() {
 				Expect(port).To(BeEquivalentTo("5672"))
 			})
 
+			By("Setting a connection string", func() {
+				Expect(secret.Data).To(HaveKey("username"), "Failed to find a key \"username\" in the generated Secret")
+				Expect(secret.Data).To(HaveKey("password"), "Failed to find a key \"password\" in the generated Secret")
+				Expect(secret.Data).To(HaveKey("host"), "Failed to find a key \"host\" in the generated Secret")
+				Expect(secret.Data).To(HaveKey("port"), "Failed to find a key \"port\" in the generated Secret")
+
+				expectedConnectionString := fmt.Appendf(nil, "amqp://%s:%s@%s:%s/", secret.Data["username"], secret.Data["password"], secret.Data["host"], secret.Data["port"])
+				Expect(secret.Data).To(HaveKeyWithValue("connection_string", expectedConnectionString))
+			})
+
 			By("creating a default_user.conf file that contains the correct sysctl config format to be parsed by RabbitMQ", func() {
 				defaultUserConf, ok := secret.Data["default_user.conf"]
 				Expect(ok).To(BeTrue(), "Failed to find a key \"default_user.conf\" in the generated Secret")
@@ -128,14 +139,33 @@ var _ = Describe("DefaultUserSecret", func() {
 		})
 	})
 
-	Context("when MQTT, STOMP, streams, WebMQTT, and WebSTOMP are enabled", func() {
-		It("adds the MQTT, STOMP, stream, WebMQTT, and WebSTOMP ports to the user secret", func() {
+	Context("Build with additionalConfig", func() {
+		It("should use the default_user and default_pass from additionalConfig", func() {
+			instance.Spec.Rabbitmq.AdditionalConfig = "default_user = my-user\ndefault_pass = my-password"
+			obj, err := defaultUserSecretBuilder.Build()
+			Expect(err).NotTo(HaveOccurred())
+			secret = obj.(*corev1.Secret)
+			Expect(string(secret.Data["username"])).To(Equal("my-user"))
+			Expect(string(secret.Data["password"])).To(Equal("my-password"))
+
+			defaultUserConf, ok := secret.Data["default_user.conf"]
+			Expect(ok).To(BeTrue(), "Failed to find a key \"default_user.conf\" in the generated Secret")
+			cfg, err := ini.Load(defaultUserConf)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Section("").Key("default_user").Value()).To(Equal("my-user"))
+			Expect(cfg.Section("").Key("default_pass").Value()).To(Equal("my-password"))
+		})
+	})
+
+	Context("when MQTT, STOMP, streams, WebAMQP, WebMQTT, and WebSTOMP are enabled", func() {
+		It("adds the MQTT, STOMP, stream, WebAMQP, WebMQTT, and WebSTOMP ports to the user secret", func() {
 			var port []byte
 
 			instance.Spec.Rabbitmq.AdditionalPlugins = []rabbitmqv1beta1.Plugin{
 				"rabbitmq_mqtt",
 				"rabbitmq_stomp",
 				"rabbitmq_stream",
+				"rabbitmq_web_amqp",
 				"rabbitmq_web_mqtt",
 				"rabbitmq_web_stomp",
 			}
@@ -163,26 +193,30 @@ var _ = Describe("DefaultUserSecret", func() {
 			port, ok = secret.Data["web-stomp-port"]
 			Expect(ok).To(BeTrue(), "Failed to find key \"web-stomp-port\" in the generated Secret")
 			Expect(port).To(BeEquivalentTo("15674"))
+
+			port, ok = secret.Data["web-amqp-port"]
+			Expect(ok).To(BeTrue(), "Failed to find key \"web-amqp-port\" in the generated Secret")
+			Expect(port).To(BeEquivalentTo("15678"))
 		})
 	})
 
 	Context("when TLS is enabled", func() {
-		It("Uses the AMQPS port in the user secret", func() {
-			var port []byte
-
+		It("Uses the AMQPS protocol in the user secret", func() {
 			instance.Spec.TLS.SecretName = "tls-secret"
 
 			obj, err := defaultUserSecretBuilder.Build()
 			Expect(err).NotTo(HaveOccurred())
 			secret = obj.(*corev1.Secret)
 
-			port, ok := secret.Data["port"]
-			Expect(ok).To(BeTrue(), "Failed to find key \"port\" in the generated Secret")
-			Expect(port).To(BeEquivalentTo("5671"))
+			By("Setting the AMQPS port in the user secret")
+			Expect(secret.Data).To(HaveKeyWithValue("port", []byte("5671")))
+
+			By("setting the connection string to use the AMQPS protocol")
+			Expect(secret.Data).To(HaveKeyWithValue("connection_string", MatchRegexp("amqps:.*:5671/")))
 		})
 
 		Context("when MQTT, STOMP, streams, WebMQTT, and WebSTOMP are enabled", func() {
-			It("adds the MQTTS, STOMPS, streams, WebMQTTS, and WebSTOMPS ports to the user secret", func() {
+			It("adds the MQTTS, STOMPS, streams, WebAMQPS, WebMQTTS, and WebSTOMPS ports to the user secret", func() {
 				var port []byte
 
 				instance.Spec.TLS.SecretName = "tls-secret"
@@ -192,6 +226,7 @@ var _ = Describe("DefaultUserSecret", func() {
 					"rabbitmq_stream",
 					"rabbitmq_web_mqtt",
 					"rabbitmq_web_stomp",
+					"rabbitmq_web_amqp",
 				}
 
 				obj, err := defaultUserSecretBuilder.Build()
@@ -217,6 +252,10 @@ var _ = Describe("DefaultUserSecret", func() {
 				port, ok = secret.Data["web-stomp-port"]
 				Expect(ok).To(BeTrue(), "Failed to find key \"web-stomp-port\" in the generated Secret")
 				Expect(port).To(BeEquivalentTo("15673"))
+
+				port, ok = secret.Data["web-amqp-port"]
+				Expect(ok).To(BeTrue(), "Failed to find key \"web-stomp-port\" in the generated Secret")
+				Expect(port).To(BeEquivalentTo("15677"))
 			})
 		})
 	})
@@ -337,6 +376,8 @@ var _ = Describe("DefaultUserSecret", func() {
 			port, ok := secret.Data["port"]
 			Expect(ok).To(BeTrue())
 			Expect(port).To(BeEquivalentTo("5671"))
+
+			Expect(secret.Data).To(HaveKeyWithValue("connection_string", MatchRegexp("amqps:.*:5671/")))
 
 			port, ok = secret.Data["mqtt-port"]
 			Expect(ok).To(BeTrue())

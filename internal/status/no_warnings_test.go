@@ -14,7 +14,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	rabbitmqstatus "github.com/rabbitmq/cluster-operator/internal/status"
+	rabbitmqstatus "github.com/rabbitmq/cluster-operator/v2/internal/status"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -62,6 +62,22 @@ var _ = Describe("NoWarnings", func() {
 			Expect(condition.Status).To(Equal(corev1.ConditionFalse))
 			Expect(condition.Reason).To(Equal("MemoryRequestAndLimitDifferent"))
 			Expect(condition.Message).NotTo(BeEmpty())
+		})
+	})
+
+	It("is true if the memory limit are not set but the request is set", func() {
+		sts := noMemoryWarningStatefulSet()
+		sts.Spec.Template.Spec.Containers[0].Resources.Limits = corev1.ResourceList{}
+		condition := rabbitmqstatus.NoWarningsCondition([]runtime.Object{sts}, nil)
+		By("having the correct type", func() {
+			var conditionType rabbitmqstatus.RabbitmqClusterConditionType = "NoWarnings"
+			Expect(condition.Type).To(Equal(conditionType))
+		})
+
+		By("having status false and reason message", func() {
+			Expect(condition.Status).To(Equal(corev1.ConditionTrue))
+			Expect(condition.Reason).To(Equal("NoWarnings"))
+			Expect(condition.Message).To(BeEmpty())
 		})
 	})
 

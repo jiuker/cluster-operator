@@ -1,11 +1,27 @@
 apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: selfsigned-issuer
+  namespace: examples
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: selfsigned-cert
+  namespace: examples
 spec:
   dnsNames:
-    - "*.tls-nodes.examples.svc.cluster.local"
+    - "tls-server-0.tls-nodes.examples.svc.cluster.local"
+    - "tls-server-1.tls-nodes.examples.svc.cluster.local"
+    - "tls-server-2.tls-nodes.examples.svc.cluster.local"
+    - "tls-server-0.tls-nodes.examples.svc"
+    - "tls-server-1.tls-nodes.examples.svc"
+    - "tls-server-2.tls-nodes.examples.svc"
+    - "tls.examples.svc.cluster.local"
+    - "tls.examples.svc"
   secretName: tls-secret
   issuerRef:
-    kind: ClusterIssuer
+    kind: Issuer
     name: selfsigned-issuer

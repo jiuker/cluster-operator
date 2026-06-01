@@ -12,12 +12,13 @@ package resource_test
 import (
 	"bytes"
 	"fmt"
-	"k8s.io/utils/pointer"
+
+	"k8s.io/utils/ptr"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	rabbitmqv1beta1 "github.com/rabbitmq/cluster-operator/api/v1beta1"
-	"github.com/rabbitmq/cluster-operator/internal/resource"
+	rabbitmqv1beta1 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
+	"github.com/rabbitmq/cluster-operator/v2/internal/resource"
 	"gopkg.in/ini.v1"
 	corev1 "k8s.io/api/core/v1"
 	k8sresource "k8s.io/apimachinery/pkg/api/resource"
@@ -28,6 +29,7 @@ import (
 
 func defaultRabbitmqConf(instanceName string) string {
 	return iniString(`
+log.console                                = true
 queue_master_locator                       = min-masters
 disk_free_limit.absolute                   = 2GB
 cluster_partition_handling                 = pause_minority
@@ -35,7 +37,10 @@ cluster_formation.peer_discovery_backend   = rabbit_peer_discovery_k8s
 cluster_formation.k8s.host                 = kubernetes.default
 cluster_formation.k8s.address_type         = hostname
 cluster_formation.target_cluster_size_hint = 1
-cluster_name                               = ` + instanceName)
+cluster_name                               = ` + instanceName + `
+auth_mechanisms.1                          = PLAIN
+auth_mechanisms.2                          = AMQPLAIN
+`)
 }
 
 var _ = Describe("GenerateServerConfigMap", func() {
@@ -130,7 +135,7 @@ var _ = Describe("GenerateServerConfigMap", func() {
 		})
 
 		It("sets owner reference", func() {
-			instance.ObjectMeta.Name = "rabbit1"
+			instance.Name = "rabbit1"
 
 			Expect(configMapBuilder.Update(configMap)).To(Succeed())
 			Expect(configMap.OwnerReferences[0].Name).To(Equal(instance.Name))
@@ -147,7 +152,7 @@ var _ = Describe("GenerateServerConfigMap", func() {
 
 		It("sets cluster size hint", func() {
 			builder.Instance.Spec.Rabbitmq.AdditionalConfig = ""
-			builder.Instance.Spec.Replicas = pointer.Int32Ptr(100)
+			builder.Instance.Spec.Replicas = ptr.To(int32(100))
 
 			Expect(configMapBuilder.Update(configMap)).To(Succeed())
 			operatorDefaultConf, err := ini.Load([]byte(configMap.Data["operatorDefaults.conf"]))
@@ -167,6 +172,22 @@ var _ = Describe("GenerateServerConfigMap", func() {
 				Expect(configMapBuilder.Update(configMap)).To(Succeed())
 				Expect(configMap.Data).To(HaveKeyWithValue("userDefinedConfiguration.conf", expectedConfiguration))
 			})
+
+			When("user restricts SSL mechanisms to EXTERNAL", func() {
+				It("adds only EXTERNAL", func() {
+					userDefinedConfiguration := "auth_mechanisms.1 = EXTERNAL"
+					instance.Spec.Rabbitmq.AdditionalConfig = userDefinedConfiguration
+					expectedConfiguration := iniString(userDefinedConfiguration)
+
+					Expect(configMapBuilder.Update(configMap)).To(Succeed())
+					Expect(configMap.Data).To(HaveKeyWithValue("userDefinedConfiguration.conf", expectedConfiguration))
+					Expect(configMap.Data).To(HaveKey("operatorDefaults.conf"))
+					operatorDefaults := configMap.Data["operatorDefaults.conf"]
+					Expect(operatorDefaults).NotTo(ContainSubstring("auth_mechanisms"))
+					Expect(operatorDefaults).NotTo(ContainSubstring("PLAIN"))
+					Expect(operatorDefaults).NotTo(ContainSubstring("ANONYMOUS"))
+				})
+			})
 		})
 
 		When("invalid userDefinedConfiguration is provided", func() {
@@ -183,7 +204,7 @@ var _ = Describe("GenerateServerConfigMap", func() {
 				Expect(configMap.Data).To(HaveKeyWithValue("advanced.config", "[my-awesome-config]."))
 			})
 
-			It("does set data.advancedConfig when empty", func() {
+			It("does not set data.advancedConfig when empty", func() {
 				instance.Spec.Rabbitmq.AdvancedConfig = ""
 				Expect(configMapBuilder.Update(configMap)).To(Succeed())
 				Expect(configMap.Data).ToNot(HaveKey("advanced.config"))
@@ -236,11 +257,35 @@ CONSOLE_LOG=new`
 					})
 				})
 			})
+
+			Context("shell command substitution", func() {
+				DescribeTable("rejects envConfig containing command substitution",
+					func(envConfig string) {
+						instance.Spec.Rabbitmq.EnvConfig = envConfig
+						Expect(configMapBuilder.Update(configMap)).To(MatchError(resource.ErrInvalidEnvConfig))
+					},
+					Entry("dollar-paren substitution", `NODENAME=rabbit@$(hostname)`),
+					Entry("backtick substitution", "NODENAME=rabbit@`hostname`"),
+					Entry("multiline with dollar-paren", "USE_LONGNAME=true\nNODENAME=$(hostname)"),
+					Entry("embedded dollar-paren", `SECRET=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)`),
+				)
+
+				DescribeTable("allows envConfig with plain variable expansion",
+					func(envConfig string) {
+						instance.Spec.Rabbitmq.EnvConfig = envConfig
+						Expect(configMapBuilder.Update(configMap)).To(Succeed())
+					},
+					Entry("dollar-brace expansion", `NODENAME=rabbit@${HOSTNAME}`),
+					Entry("dollar expansion", `NODENAME=rabbit@$HOSTNAME`),
+					Entry("plain key=value", `USE_LONGNAME=true`),
+					Entry("multiple plain assignments", "USE_LONGNAME=true\nCONSOLE_LOG=new"),
+				)
+			})
 		})
 
 		Context("TLS", func() {
 			It("adds TLS config when TLS is enabled", func() {
-				instance.ObjectMeta.Name = "rabbit-tls"
+				instance.Name = "rabbit-tls"
 				instance.Spec.TLS.SecretName = "tls-secret"
 
 				expectedConfiguration := iniString(`ssl_options.certfile  = /etc/rabbitmq-tls/tls.crt
@@ -263,7 +308,7 @@ CONSOLE_LOG=new`
 				It("adds TLS config for the additional plugins", func() {
 					additionalPlugins := []rabbitmqv1beta1.Plugin{"rabbitmq_mqtt", "rabbitmq_stomp", "rabbitmq_amqp_1_0", "rabbitmq_stream"}
 
-					instance.ObjectMeta.Name = "rabbit-tls"
+					instance.Name = "rabbit-tls"
 					instance.Spec.TLS.SecretName = "tls-secret"
 					instance.Spec.Rabbitmq.AdditionalPlugins = additionalPlugins
 
@@ -287,8 +332,48 @@ CONSOLE_LOG=new`
 				})
 			})
 
+			When("Web AMQP, Web MQTT and Web STOMP are enabled", func() {
+				It("adds TLS config for the additional plugins", func() {
+					additionalPlugins := []rabbitmqv1beta1.Plugin{"rabbitmq_web_amqp", "rabbitmq_web_mqtt", "rabbitmq_web_stomp"}
+
+					instance.Name = "rabbit-tls"
+					instance.Spec.TLS.SecretName = "tls-secret"
+					instance.Spec.Rabbitmq.AdditionalPlugins = additionalPlugins
+
+					expectedConfiguration := iniString(`ssl_options.certfile   = /etc/rabbitmq-tls/tls.crt
+						ssl_options.keyfile    = /etc/rabbitmq-tls/tls.key
+						listeners.ssl.default  = 5671
+
+						management.ssl.certfile   = /etc/rabbitmq-tls/tls.crt
+						management.ssl.keyfile    = /etc/rabbitmq-tls/tls.key
+						management.ssl.port       = 15671
+
+						prometheus.ssl.certfile = /etc/rabbitmq-tls/tls.crt
+						prometheus.ssl.keyfile   = /etc/rabbitmq-tls/tls.key
+						prometheus.ssl.port       = 15691
+						management.tcp.port       = 15672
+						prometheus.tcp.port       = 15692
+
+						web_mqtt.ssl.port       = 15676
+						web_mqtt.ssl.certfile   = /etc/rabbitmq-tls/tls.crt
+						web_mqtt.ssl.keyfile    = /etc/rabbitmq-tls/tls.key
+
+						web_stomp.ssl.port       = 15673
+						web_stomp.ssl.certfile   = /etc/rabbitmq-tls/tls.crt
+						web_stomp.ssl.keyfile    = /etc/rabbitmq-tls/tls.key
+
+						web_amqp.tcp.port       = 15678
+						web_amqp.tls.port       = 15677
+						web_amqp.tls.certfile   = /etc/rabbitmq-tls/tls.crt
+						web_amqp.tls.keyfile    = /etc/rabbitmq-tls/tls.key`)
+
+					Expect(configMapBuilder.Update(configMap)).To(Succeed())
+					Expect(configMap.Data).To(HaveKeyWithValue("userDefinedConfiguration.conf", expectedConfiguration))
+				})
+			})
+
 			It("preserves user configuration over Operator generated settings", func() {
-				instance.ObjectMeta.Name = "rabbit-tls-with-user-conf"
+				instance.Name = "rabbit-tls-with-user-conf"
 				instance.Spec.TLS.SecretName = "tls-secret"
 				instance.Spec.Rabbitmq.AdditionalConfig = "listeners.ssl.default = 12345"
 
@@ -311,7 +396,7 @@ CONSOLE_LOG=new`
 
 		Context("Mutual TLS", func() {
 			It("adds TLS config when TLS is enabled", func() {
-				instance.ObjectMeta.Name = "rabbit-tls"
+				instance.Name = "rabbit-tls"
 				instance.Spec.TLS.SecretName = "tls-secret"
 				instance.Spec.TLS.CaSecretName = "tls-mutual-secret"
 
@@ -335,11 +420,11 @@ CONSOLE_LOG=new`
 				Expect(configMap.Data).To(HaveKeyWithValue("userDefinedConfiguration.conf", expectedConfiguration))
 			})
 
-			When("Web MQTT and Web STOMP are enabled", func() {
+			When("Web AMQP, Web MQTT and Web STOMP are enabled", func() {
 				It("adds TLS config for the additional plugins", func() {
-					additionalPlugins := []rabbitmqv1beta1.Plugin{"rabbitmq_web_mqtt", "rabbitmq_web_stomp"}
+					additionalPlugins := []rabbitmqv1beta1.Plugin{"rabbitmq_web_amqp", "rabbitmq_web_mqtt", "rabbitmq_web_stomp"}
 
-					instance.ObjectMeta.Name = "rabbit-tls"
+					instance.Name = "rabbit-tls"
 					instance.Spec.TLS.SecretName = "tls-secret"
 					instance.Spec.TLS.CaSecretName = "tls-mutual-secret"
 					instance.Spec.Rabbitmq.AdditionalPlugins = additionalPlugins
@@ -359,20 +444,28 @@ CONSOLE_LOG=new`
 						management.tcp.port       = 15672
 						prometheus.tcp.port       = 15692
 
+
+						web_mqtt.ssl.port       = 15676
+						web_mqtt.ssl.certfile   = /etc/rabbitmq-tls/tls.crt
+						web_mqtt.ssl.keyfile    = /etc/rabbitmq-tls/tls.key
+
+						web_stomp.ssl.port       = 15673
+						web_stomp.ssl.certfile   = /etc/rabbitmq-tls/tls.crt
+						web_stomp.ssl.keyfile    = /etc/rabbitmq-tls/tls.key
+
+						web_amqp.tcp.port       = 15678
+						web_amqp.tls.port       = 15677
+						web_amqp.tls.certfile   = /etc/rabbitmq-tls/tls.crt
+						web_amqp.tls.keyfile    = /etc/rabbitmq-tls/tls.key
+
 						ssl_options.cacertfile = /etc/rabbitmq-tls/ca.crt
 						ssl_options.verify     = verify_peer
 						management.ssl.cacertfile = /etc/rabbitmq-tls/ca.crt
 						prometheus.ssl.cacertfile = /etc/rabbitmq-tls/ca.crt
 
-						web_mqtt.ssl.port       = 15676
 						web_mqtt.ssl.cacertfile = /etc/rabbitmq-tls/ca.crt
-						web_mqtt.ssl.certfile   = /etc/rabbitmq-tls/tls.crt
-						web_mqtt.ssl.keyfile    = /etc/rabbitmq-tls/tls.key
-
-						web_stomp.ssl.port       = 15673
 						web_stomp.ssl.cacertfile = /etc/rabbitmq-tls/ca.crt
-						web_stomp.ssl.certfile   = /etc/rabbitmq-tls/tls.crt
-						web_stomp.ssl.keyfile    = /etc/rabbitmq-tls/tls.key`)
+						web_amqp.tls.cacertfile = /etc/rabbitmq-tls/ca.crt`)
 
 					Expect(configMapBuilder.Update(configMap)).To(Succeed())
 					Expect(configMap.Data).To(HaveKeyWithValue("userDefinedConfiguration.conf", expectedConfiguration))
@@ -387,7 +480,7 @@ CONSOLE_LOG=new`
 						Name: "rabbit-tls",
 					},
 					Spec: rabbitmqv1beta1.RabbitmqClusterSpec{
-						Replicas: pointer.Int32Ptr(1),
+						Replicas: ptr.To(int32(1)),
 						TLS: rabbitmqv1beta1.TLSSpec{
 							SecretName:             "some-secret",
 							DisableNonTLSListeners: true,
@@ -419,7 +512,7 @@ CONSOLE_LOG=new`
 						Name: "rabbit-tls",
 					},
 					Spec: rabbitmqv1beta1.RabbitmqClusterSpec{
-						Replicas: pointer.Int32Ptr(1),
+						Replicas: ptr.To(int32(1)),
 						TLS: rabbitmqv1beta1.TLSSpec{
 							SecretName:             "some-secret",
 							DisableNonTLSListeners: true,
@@ -467,7 +560,7 @@ CONSOLE_LOG=new`
 						Name: "rabbit-tls",
 					},
 					Spec: rabbitmqv1beta1.RabbitmqClusterSpec{
-						Replicas: pointer.Int32Ptr(1),
+						Replicas: ptr.To(int32(1)),
 						TLS: rabbitmqv1beta1.TLSSpec{
 							SecretName:             "some-secret",
 							CaSecretName:           "some-mutual-secret",
@@ -475,6 +568,7 @@ CONSOLE_LOG=new`
 						},
 						Rabbitmq: rabbitmqv1beta1.RabbitmqClusterConfigurationSpec{
 							AdditionalPlugins: []rabbitmqv1beta1.Plugin{
+								"rabbitmq_web_amqp",
 								"rabbitmq_web_mqtt",
 								"rabbitmq_web_stomp",
 							},
@@ -496,22 +590,28 @@ CONSOLE_LOG=new`
 
 					listeners.tcp = none
 
-					ssl_options.cacertfile = /etc/rabbitmq-tls/ca.crt
-					ssl_options.verify     = verify_peer
-					management.ssl.cacertfile = /etc/rabbitmq-tls/ca.crt
-					prometheus.ssl.cacertfile = /etc/rabbitmq-tls/ca.crt
-
 					web_mqtt.ssl.port       = 15676
-					web_mqtt.ssl.cacertfile = /etc/rabbitmq-tls/ca.crt
 					web_mqtt.ssl.certfile   = /etc/rabbitmq-tls/tls.crt
 					web_mqtt.ssl.keyfile    = /etc/rabbitmq-tls/tls.key
 					web_mqtt.tcp.listener = none
 
 					web_stomp.ssl.port       = 15673
-					web_stomp.ssl.cacertfile = /etc/rabbitmq-tls/ca.crt
 					web_stomp.ssl.certfile   = /etc/rabbitmq-tls/tls.crt
 					web_stomp.ssl.keyfile    = /etc/rabbitmq-tls/tls.key
-					web_stomp.tcp.listener = none`)
+					web_stomp.tcp.listener = none
+
+					web_amqp.tls.port       = 15677
+					web_amqp.tls.certfile   = /etc/rabbitmq-tls/tls.crt
+					web_amqp.tls.keyfile    = /etc/rabbitmq-tls/tls.key
+
+					ssl_options.cacertfile = /etc/rabbitmq-tls/ca.crt
+					ssl_options.verify     = verify_peer
+					management.ssl.cacertfile = /etc/rabbitmq-tls/ca.crt
+					prometheus.ssl.cacertfile = /etc/rabbitmq-tls/ca.crt
+
+					web_mqtt.ssl.cacertfile = /etc/rabbitmq-tls/ca.crt
+					web_stomp.ssl.cacertfile = /etc/rabbitmq-tls/ca.crt
+					web_amqp.tls.cacertfile = /etc/rabbitmq-tls/ca.crt`)
 
 				Expect(configMapBuilder.Update(configMap)).To(Succeed())
 				Expect(configMap.Data).To(HaveKeyWithValue("userDefinedConfiguration.conf", expectedConfiguration))
@@ -521,7 +621,7 @@ CONSOLE_LOG=new`
 		Context("Memory Limits", func() {
 			It("sets a RabbitMQ memory limit with headroom when memory limits are specified", func() {
 				const GiB int64 = 1073741824
-				instance.ObjectMeta.Name = "rabbit-mem-limit"
+				instance.Name = "rabbit-mem-limit"
 				instance.Spec.Resources.Limits = map[corev1.ResourceName]k8sresource.Quantity{corev1.ResourceMemory: k8sresource.MustParse("10Gi")}
 
 				expectedConfiguration := iniString(fmt.Sprintf("total_memory_available_override_value = %d", 8*GiB))
@@ -558,6 +658,60 @@ CONSOLE_LOG=new`
 			}
 			Expect(configMapBuilder.Update(configMap)).To(Succeed())
 			Expect(configMap.Annotations).To(BeEmpty())
+		})
+
+		Context("Erlang INET configuration", func() {
+			It("sets erlangInetRc key", func() {
+				instance.Spec.Rabbitmq.ErlangInetConfig = "{any-config, is-set}."
+				Expect(configMapBuilder.Update(configMap)).To(Succeed())
+				Expect(configMap.Data).To(HaveKeyWithValue("erl_inetrc", "{any-config, is-set}."))
+			})
+
+			When("erlangInetRc is removed", func() {
+				It("deletes the key", func() {
+					instance.Spec.Rabbitmq.ErlangInetConfig = "any string is set, rabbit will do validation"
+					Expect(configMapBuilder.Update(configMap)).To(Succeed())
+					Expect(configMap.Data).To(HaveKey("erl_inetrc"))
+
+					instance.Spec.Rabbitmq.ErlangInetConfig = ""
+					Expect(configMapBuilder.Update(configMap)).To(Succeed())
+					Expect(configMap.Data).ToNot(HaveKey("erl_inetrc"))
+				})
+			})
+		})
+
+		Describe("UpdateRequiresStsRestart", func() {
+			BeforeEach(func() {
+				Expect(configMapBuilder.Update(configMap)).To(Succeed())
+				Expect(configMapBuilder.UpdateRequiresStsRestart).To(BeTrue())
+			})
+			When("the config does not change", func() {
+				It("does not restart StatefulSet", func() {
+					Expect(configMapBuilder.Update(configMap)).To(Succeed())
+					Expect(configMapBuilder.UpdateRequiresStsRestart).To(BeFalse())
+				})
+			})
+			When("the only config change is cluster formation nodes", func() {
+				It("does not require the StatefulSet to be restarted", func() {
+					instance.Spec.Replicas = ptr.To(int32(3))
+					Expect(configMapBuilder.Update(configMap)).To(Succeed())
+					Expect(configMapBuilder.UpdateRequiresStsRestart).To(BeFalse())
+				})
+			})
+			When("config change includes more than cluster formation nodes", func() {
+				It("requires the StatefulSet to be restarted", func() {
+					instance.Spec.Replicas = ptr.To(int32(3))
+					instance.Spec.Rabbitmq.AdditionalConfig = "foo = bar"
+					Expect(configMapBuilder.Update(configMap)).To(Succeed())
+					Expect(configMapBuilder.UpdateRequiresStsRestart).To(BeTrue())
+				})
+			})
+		})
+
+		It("should parse multi-line config", func() {
+			instance.Spec.Rabbitmq.AdditionalConfig = "multi_line_value = \"\"\"\nfirst_line\nsecond_line\n\"\"\""
+			Expect(configMapBuilder.Update(configMap)).To(Succeed())
+			Expect(configMap.Data["userDefinedConfiguration.conf"]).To(Equal("multi_line_value = \"\"\"\nfirst_line\nsecond_line\n\"\"\"\n"))
 		})
 	})
 

@@ -15,9 +15,18 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 
+	"slices"
+
 	corev1 "k8s.io/api/core/v1"
 	k8sresource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+const (
+	DisableDefaultTopologySpreadAnnotation = "rabbitmq.com/disable-default-topology-spread-constraints"
+	RabbitmqVersionAnnotation              = "rabbitmq.com/version"
+	ErlangVersionAnnotation                = "rabbitmq.com/erlang-version"
+	VersionNotAnnotated                    = "VersionNotAnnotated"
 )
 
 // +kubebuilder:object:root=true
@@ -25,7 +34,7 @@ import (
 // +kubebuilder:printcolumn:name="AllReplicasReady",type="string",JSONPath=".status.conditions[?(@.type == 'AllReplicasReady')].status"
 // +kubebuilder:printcolumn:name="ReconcileSuccess",type="string",JSONPath=".status.conditions[?(@.type == 'ReconcileSuccess')].status"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-// +kubebuilder:resource:shortName={"rmq"},categories=all;rabbitmq
+// +kubebuilder:resource:shortName={"rmq"},categories=rabbitmq
 // RabbitmqCluster is the Schema for the RabbitmqCluster API. Each instance of this object
 // corresponds to a single RabbitMQ cluster.
 type RabbitmqCluster struct {
@@ -78,6 +87,9 @@ type RabbitmqClusterSpec struct {
 	// Has no effect if the cluster only consists of one node.
 	// For more information, see https://www.rabbitmq.com/rabbitmq-queues.8.html#rebalance
 	SkipPostDeploySteps bool `json:"skipPostDeploySteps,omitempty"`
+	// Set to true to automatically enable all feature flags after each upgrade
+	// For more information, see https://www.rabbitmq.com/docs/feature-flags
+	AutoEnableAllFeatureFlags bool `json:"autoEnableAllFeatureFlags,omitempty"`
 	// TerminationGracePeriodSeconds is the timeout that each rabbitmqcluster pod will have to terminate gracefully.
 	// It defaults to 604800 seconds ( a week long) to ensure that the container preStop lifecycle hook can finish running.
 	// For more information, see: https://github.com/rabbitmq/cluster-operator/blob/main/docs/design/20200520-graceful-pod-termination.md
@@ -104,7 +116,8 @@ type RabbitmqClusterSpec struct {
 // Future secret backends could be Secrets Store CSI Driver.
 // If not configured, K8s Secrets will be used.
 type SecretBackend struct {
-	Vault *VaultSpec `json:"vault,omitempty"`
+	Vault          *VaultSpec                  `json:"vault,omitempty"`
+	ExternalSecret corev1.LocalObjectReference `json:"externalSecret,omitempty"`
 }
 
 // VaultSpec will add Vault annotations (see https://www.vaultproject.io/docs/platform/k8s/injector/annotations)
@@ -150,10 +163,16 @@ type VaultTLSSpec struct {
 	// Specifies the requested IP Subject Alternative Names, in a comma-delimited list.
 	// +optional
 	IpSans string `json:"ipSans,omitempty"`
+	// Specifies an optional path to retrieve the root CA from vault.  Useful if certificates are issued by an intermediate CA
+	// +optional
+	PKIRootPath string `json:"pkiRootPath,omitempty"`
 }
 
 func (spec *VaultSpec) TLSEnabled() bool {
 	return spec.TLS.PKIIssuerPath != ""
+}
+func (spec *VaultSpec) RootCAEnabled() bool {
+	return spec.TLS.PKIRootPath != ""
 }
 func (spec *VaultSpec) DefaultUserSecretEnabled() bool {
 	return spec.DefaultUserPath != ""
@@ -250,6 +269,11 @@ type StatefulSetSpec struct {
 	// is ready).
 	// +optional
 	MinReadySeconds int32 `json:"minReadySeconds,omitempty" protobuf:"varint,4,opt,name=minReadySeconds"`
+
+	// StatefulSetPersistentVolumeClaimRetentionPolicy describes the policy used for PVCs
+	// created from the StatefulSet VolumeClaimTemplates.
+	// +optional
+	PersistentVolumeClaimRetentionPolicy *appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy `json:"persistentVolumeClaimRetentionPolicy,omitempty" protobuf:"bytes,10,opt,name=persistentVolumeClaimRetentionPolicy"`
 }
 
 // EmbeddedLabelsAnnotations is an embedded subset of the fields included in k8s.io/apimachinery/pkg/apis/meta/v1.ObjectMeta.
@@ -336,18 +360,18 @@ type PersistentVolumeClaim struct {
 	Spec corev1.PersistentVolumeClaimSpec `json:"spec,omitempty" protobuf:"bytes,2,opt,name=spec"`
 }
 
-// Allows for the configuration of TLS certificates to be used by RabbitMQ. Also allows for non-TLS traffic to be disabled.
+// TLSSpec allows for the configuration of TLS certificates to be used by RabbitMQ. Also allows for non-TLS traffic to be disabled.
 type TLSSpec struct {
 	// Name of a Secret in the same Namespace as the RabbitmqCluster, containing the server's private key & public certificate for TLS.
 	// The Secret must store these as tls.key and tls.crt, respectively.
-	// This Secret can be created by running `kubectl create secret tls tls-secret --cert=path/to/tls.cert --key=path/to/tls.key`
+	// This Secret can be created by running `kubectl create secret tls tls-secret --cert=path/to/tls.crt --key=path/to/tls.key`
 	SecretName string `json:"secretName,omitempty"`
 	// Name of a Secret in the same Namespace as the RabbitmqCluster, containing the Certificate Authority's public certificate for TLS.
 	// The Secret must store this as ca.crt.
-	// This Secret can be created by running `kubectl create secret generic ca-secret --from-file=ca.crt=path/to/ca.cert`
-	// Used for mTLS, and TLS for rabbitmq_web_stomp and rabbitmq_web_mqtt.
+	// This Secret can be created by running `kubectl create secret generic ca-secret --from-file=ca.crt=path/to/ca.crt`
+	// Used for mTLS.
 	CaSecretName string `json:"caSecretName,omitempty"`
-	// When set to true, the RabbitmqCluster disables non-TLS listeners for RabbitMQ, management plugin and for any enabled plugins in the following list: stomp, mqtt, web_stomp, web_mqtt.
+	// When set to true, the RabbitmqCluster disables non-TLS listeners for RabbitMQ, management plugin and for any enabled plugins in the following list: stomp, mqtt, web_stomp, web_mqtt, web_amqp.
 	// Only TLS-enabled clients will be able to connect.
 	DisableNonTLSListeners bool `json:"disableNonTLSListeners,omitempty"`
 }
@@ -368,7 +392,7 @@ type RabbitmqClusterConfigurationSpec struct {
 	// Modify to add to the rabbitmq.conf file in addition to default configurations set by the operator.
 	// Modifying this property on an existing RabbitmqCluster will trigger a StatefulSet rolling restart and will cause rabbitmq downtime.
 	// For more information on this config, see https://www.rabbitmq.com/configure.html#config-file
-	// +kubebuilder:validation:MaxLength:=2000
+	// +kubebuilder:validation:MaxLength:=100000
 	AdditionalConfig string `json:"additionalConfig,omitempty"`
 	// Specify any rabbitmq advanced.config configurations to apply to the cluster.
 	// For more information on advanced config, see https://www.rabbitmq.com/configure.html#advanced-config-file
@@ -377,7 +401,12 @@ type RabbitmqClusterConfigurationSpec struct {
 	// Modify to add to the rabbitmq-env.conf file. Modifying this property on an existing RabbitmqCluster will trigger a StatefulSet rolling restart and will cause rabbitmq downtime.
 	// For more information on env config, see https://www.rabbitmq.com/man/rabbitmq-env.conf.5.html
 	// +kubebuilder:validation:MaxLength:=100000
+	// +kubebuilder:validation:XValidation:rule="!self.contains('$(') && !self.contains('`')",message="envConfig must not contain shell command substitution ('$(...)' or backticks)"
 	EnvConfig string `json:"envConfig,omitempty"`
+	// Erlang Inet configuration to apply to the Erlang VM running rabbit.
+	// See also: https://www.erlang.org/doc/apps/erts/inet_cfg.html
+	// +kubebuilder:validation:MaxLength:=2000
+	ErlangInetConfig string `json:"erlangInetConfig,omitempty"`
 }
 
 // The settings for the persistent storage desired for each Pod in the RabbitmqCluster.
@@ -389,6 +418,24 @@ type RabbitmqClusterPersistenceSpec struct {
 	// See https://pkg.go.dev/k8s.io/apimachinery/pkg/api/resource#Quantity for more info on the format of this field.
 	// +kubebuilder:default:="10Gi"
 	Storage *k8sresource.Quantity `json:"storage,omitempty"`
+	// EmptyDir configuration to be used when Storage is set to 0Gi.
+	// +optional
+	EmptyDir *RabbitmqClusterEmptyDirSpec `json:"emptyDir,omitempty"`
+}
+
+// RabbitmqClusterEmptyDirSpec contains configuration for EmptyDir volumes.
+type RabbitmqClusterEmptyDirSpec struct {
+	// Medium represents the storage medium for the EmptyDir volume.
+	// The default is "" which means to use the node's default medium.
+	// Must be an empty string (default) or Memory.
+	// More info: https://kubernetes.io/docs/concepts/storage/volumes#emptydir
+	// +optional
+	Medium corev1.StorageMedium `json:"medium,omitempty"`
+	// SizeLimit sets the size limit for EmptyDir volumes.
+	// The format of this field matches that defined by kubernetes/apimachinery.
+	// See https://pkg.go.dev/k8s.io/apimachinery/pkg/api/resource#Quantity for more info on the format of this field.
+	// +optional
+	SizeLimit *k8sresource.Quantity `json:"sizeLimit,omitempty"`
 }
 
 // Settable attributes for the Service resource.
@@ -400,6 +447,12 @@ type RabbitmqClusterServiceSpec struct {
 	Type corev1.ServiceType `json:"type,omitempty"`
 	// Annotations to add to the Service.
 	Annotations map[string]string `json:"annotations,omitempty"`
+	// IPFamilyPolicy represents the dual-stack-ness requested or required by a Service
+	// See also: https://pkg.go.dev/k8s.io/api/core/v1#IPFamilyPolicy
+	// +kubebuilder:validation:Enum=SingleStack;PreferDualStack;RequireDualStack
+	IPFamilyPolicy *corev1.IPFamilyPolicy `json:"ipFamilyPolicy,omitempty"`
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 func (cluster *RabbitmqCluster) TLSEnabled() bool {
@@ -426,25 +479,26 @@ func (cluster *RabbitmqCluster) DisableNonTLSListeners() bool {
 }
 
 func (cluster *RabbitmqCluster) AdditionalPluginEnabled(plugin Plugin) bool {
-	for _, p := range cluster.Spec.Rabbitmq.AdditionalPlugins {
-		if p == plugin {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(cluster.Spec.Rabbitmq.AdditionalPlugins, plugin)
 }
 
-// the OSR plugin `rabbitmq_multi_dc_replication` enables `rabbitmq_stream` as a dependency
+// StreamNeeded returns true when stream or plugins that auto enable stream are turned on
 func (cluster *RabbitmqCluster) StreamNeeded() bool {
-	return cluster.AdditionalPluginEnabled("rabbitmq_stream") || cluster.AdditionalPluginEnabled("rabbitmq_multi_dc_replication")
+	return cluster.AdditionalPluginEnabled("rabbitmq_stream") ||
+		cluster.AdditionalPluginEnabled("rabbitmq_stream_management") ||
+		cluster.AdditionalPluginEnabled("rabbitmq_multi_dc_replication")
 }
 
 func (cluster *RabbitmqCluster) VaultEnabled() bool {
 	return cluster.Spec.SecretBackend.Vault != nil
 }
 
-func (cluster *RabbitmqCluster) UsesDefaultUserUpdaterImage() bool {
-	return cluster.VaultEnabled() && cluster.Spec.SecretBackend.Vault.DefaultUserUpdaterImage == nil
+func (cluster *RabbitmqCluster) ExternalSecretEnabled() bool {
+	return cluster.Spec.SecretBackend.ExternalSecret.Name != ""
+}
+
+func (cluster *RabbitmqCluster) UsesDefaultUserUpdaterImage(controlRabbitmqImage bool) bool {
+	return cluster.VaultEnabled() && (cluster.Spec.SecretBackend.Vault.DefaultUserUpdaterImage == nil || controlRabbitmqImage)
 }
 
 func (cluster *RabbitmqCluster) VaultDefaultUserSecretEnabled() bool {
@@ -471,12 +525,40 @@ type RabbitmqClusterList struct {
 	Items []RabbitmqCluster `json:"items"`
 }
 
-func (cluster RabbitmqCluster) ChildResourceName(name string) string {
+func (cluster *RabbitmqCluster) ChildResourceName(name string) string {
 	return strings.TrimSuffix(strings.Join([]string{cluster.Name, name}, "-"), "-")
 }
 
-func (cluster RabbitmqCluster) PVCName(i int) string {
+func (cluster *RabbitmqCluster) PVCName(i int) string {
 	return strings.Join([]string{"persistence", cluster.Name, "server", strconv.Itoa(i)}, "-")
+}
+
+func (cluster *RabbitmqCluster) DisableDefaultTopologySpreadConstraints() bool {
+	value, ok := cluster.Annotations[DisableDefaultTopologySpreadAnnotation]
+	if ok && strings.TrimSpace(value) == "true" {
+		return true
+	}
+	return false
+}
+
+func (cluster *RabbitmqCluster) GetRabbitMQVersion() string {
+	if cluster.Annotations == nil {
+		return VersionNotAnnotated
+	}
+	if value, ok := cluster.Annotations[RabbitmqVersionAnnotation]; ok {
+		return value
+	}
+	return VersionNotAnnotated
+}
+
+func (cluster *RabbitmqCluster) GetErlangVersion() string {
+	if cluster.Annotations == nil {
+		return VersionNotAnnotated
+	}
+	if value, ok := cluster.Annotations[ErlangVersionAnnotation]; ok {
+		return value
+	}
+	return VersionNotAnnotated
 }
 
 func init() {

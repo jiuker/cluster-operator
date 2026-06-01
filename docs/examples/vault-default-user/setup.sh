@@ -2,11 +2,16 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+
 RABBITMQ_NAMESPACE=${RABBITMQ_NAMESPACE:-'examples'}
 
 vault_exec () {
     kubectl exec vault-0 -c vault -- /bin/sh -c "$*"
 }
+
+# shellcheck source=../../../scripts/with_retry.sh
+source "$SCRIPT_DIR/../../../scripts/with_retry.sh"
 
 echo "Installing Vault server and Vault agent injector..."
 helm repo add hashicorp https://helm.releases.hashicorp.com
@@ -14,13 +19,14 @@ helm repo update
 # For OpenShift deployments, also set the following:
 # --set "global.openshift=true"
 helm install vault hashicorp/vault \
-    --version 0.19.0 \
+    --version 0.31.0 \
     --set='server.dev.enabled=true' \
     --set='server.logLevel=debug' \
     --set='injector.logLevel=debug' \
     --wait
-sleep 5
-kubectl wait --for=condition=Ready pod/vault-0
+
+kubectl wait --for=condition=Ready pod/vault-0 --timeout=3m
+with_retry "vault_exec 'vault status'"
 
 echo "Configuring K8s authentication..."
 # Required so that Vault init container and sidecar of RabbitmqCluster can authenticate with Vault.

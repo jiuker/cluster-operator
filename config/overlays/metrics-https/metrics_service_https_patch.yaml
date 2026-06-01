@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-cluster-operator-metrics-service
+spec:
+  selector:
+    app.kubernetes.io/name: rabbitmq-cluster-operator
+  ports:
+  - name: https
+    port: 8443
+    protocol: TCP
+    targetPort: 8443
+  $patch: replace

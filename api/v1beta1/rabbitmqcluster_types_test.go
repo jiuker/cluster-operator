@@ -11,26 +11,26 @@ package v1beta1
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/rabbitmq/cluster-operator/internal/status"
+	"github.com/rabbitmq/cluster-operator/v2/internal/status"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	k8sresource "k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
-	"golang.org/x/net/context"
+	"context"
+
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
 var _ = Describe("RabbitmqCluster", func() {
-
 	Context("RabbitmqClusterSpec", func() {
 		It("can be created with a single replica", func() {
 			created := generateRabbitmqClusterObject("rabbit1")
-			created.Spec.Replicas = pointer.Int32Ptr(1)
+			created.Spec.Replicas = ptr.To(int32(1))
 			Expect(k8sClient.Create(context.Background(), created)).To(Succeed())
 
 			fetched := &RabbitmqCluster{}
@@ -40,7 +40,7 @@ var _ = Describe("RabbitmqCluster", func() {
 
 		It("can be created with three replicas", func() {
 			created := generateRabbitmqClusterObject("rabbit2")
-			created.Spec.Replicas = pointer.Int32Ptr(3)
+			created.Spec.Replicas = ptr.To(int32(3))
 			Expect(k8sClient.Create(context.Background(), created)).To(Succeed())
 
 			fetched := &RabbitmqCluster{}
@@ -50,7 +50,7 @@ var _ = Describe("RabbitmqCluster", func() {
 
 		It("can be created with five replicas", func() {
 			created := generateRabbitmqClusterObject("rabbit3")
-			created.Spec.Replicas = pointer.Int32Ptr(5)
+			created.Spec.Replicas = ptr.To(int32(5))
 			Expect(k8sClient.Create(context.Background(), created)).To(Succeed())
 
 			fetched := &RabbitmqCluster{}
@@ -69,11 +69,11 @@ var _ = Describe("RabbitmqCluster", func() {
 		It("can be created with resource requests", func() {
 			created := generateRabbitmqClusterObject("rabbit-resource-request")
 			created.Spec.Resources = &corev1.ResourceRequirements{
-				Limits: map[corev1.ResourceName]resource.Quantity{
+				Limits: map[corev1.ResourceName]k8sresource.Quantity{
 					corev1.ResourceCPU:    k8sresource.MustParse("100m"),
 					corev1.ResourceMemory: k8sresource.MustParse("100Mi"),
 				},
-				Requests: map[corev1.ResourceName]resource.Quantity{
+				Requests: map[corev1.ResourceName]k8sresource.Quantity{
 					corev1.ResourceCPU:    k8sresource.MustParse("100m"),
 					corev1.ResourceMemory: k8sresource.MustParse("100Mi"),
 				},
@@ -116,7 +116,7 @@ var _ = Describe("RabbitmqCluster", func() {
 			Expect(created.MemoryLimited()).To(BeTrue())
 
 			created.Spec.Resources = &corev1.ResourceRequirements{
-				Limits: map[corev1.ResourceName]resource.Quantity{},
+				Limits: map[corev1.ResourceName]k8sresource.Quantity{},
 			}
 			Expect(created.MemoryLimited()).To(BeFalse())
 		})
@@ -124,7 +124,7 @@ var _ = Describe("RabbitmqCluster", func() {
 		It("is validated", func() {
 			By("checking the replica count", func() {
 				invalidReplica := generateRabbitmqClusterObject("rabbit4")
-				invalidReplica.Spec.Replicas = pointer.Int32Ptr(-1)
+				invalidReplica.Spec.Replicas = ptr.To(int32(-1))
 				Expect(apierrors.IsInvalid(k8sClient.Create(context.Background(), invalidReplica))).To(BeTrue())
 				Expect(k8sClient.Create(context.Background(), invalidReplica)).To(MatchError(ContainSubstring("spec.replicas in body should be greater than or equal to 0")))
 			})
@@ -135,12 +135,94 @@ var _ = Describe("RabbitmqCluster", func() {
 				Expect(apierrors.IsInvalid(k8sClient.Create(context.Background(), invalidService))).To(BeTrue())
 				Expect(k8sClient.Create(context.Background(), invalidService)).To(MatchError(ContainSubstring("supported values: \"ClusterIP\", \"LoadBalancer\", \"NodePort\"")))
 			})
+
+			By("checking the IP family policy", func() {
+				invalidSvc := generateRabbitmqClusterObject("madeup-family-policy")
+				policy := corev1.IPFamilyPolicy("my-awesome-policy")
+				invalidSvc.Spec.Service.IPFamilyPolicy = &policy
+				Expect(apierrors.IsInvalid(k8sClient.Create(context.Background(), invalidSvc))).To(BeTrue())
+			})
+
+			By("rejecting envConfig with dollar-paren command substitution", func() {
+				invalid := generateRabbitmqClusterObject("rabbit-inject-dollar-paren")
+				invalid.Spec.Rabbitmq.EnvConfig = `NODENAME=rabbit@$(hostname)`
+				Expect(apierrors.IsInvalid(k8sClient.Create(context.Background(), invalid))).To(BeTrue())
+				Expect(k8sClient.Create(context.Background(), invalid)).To(MatchError(ContainSubstring("shell command substitution")))
+			})
+
+			By("rejecting envConfig with backtick command substitution", func() {
+				invalid := generateRabbitmqClusterObject("rabbit-inject-backtick")
+				invalid.Spec.Rabbitmq.EnvConfig = "NODENAME=rabbit@`hostname`"
+				Expect(apierrors.IsInvalid(k8sClient.Create(context.Background(), invalid))).To(BeTrue())
+				Expect(k8sClient.Create(context.Background(), invalid)).To(MatchError(ContainSubstring("shell command substitution")))
+			})
+
+			By("allowing envConfig with plain variable expansion", func() {
+				valid := generateRabbitmqClusterObject("rabbit-envconfig-plain-var")
+				valid.Spec.Rabbitmq.EnvConfig = "NODENAME=rabbit@$HOSTNAME"
+				Expect(k8sClient.Create(context.Background(), valid)).To(Succeed())
+			})
+		})
+
+		It("can be created with Erlang configuration", func() {
+			created := generateRabbitmqClusterObject("erlang-configuration")
+			erlangConfig := "{some_config, 123}."
+			created.Spec.Rabbitmq.ErlangInetConfig = erlangConfig
+			Expect(k8sClient.Create(context.Background(), created)).To(Succeed())
+
+			got := &RabbitmqCluster{}
+			Expect(k8sClient.Get(context.Background(), getKey(created), got)).To(Succeed())
+			Expect(got.Spec.Rabbitmq.ErlangInetConfig).To(Equal(erlangConfig))
 		})
 
 		Describe("ChildResourceName", func() {
 			It("prefixes the passed string with the name of the RabbitmqCluster name", func() {
 				resource := generateRabbitmqClusterObject("iam")
 				Expect(resource.ChildResourceName("great")).To(Equal("iam-great"))
+			})
+		})
+
+		Describe("GetRabbitMQVersion", func() {
+			It("returns the correct version when annotated", func() {
+				resource := generateRabbitmqClusterObject("rabbit-version")
+				resource.Annotations = map[string]string{
+					RabbitmqVersionAnnotation: "3.13.0",
+				}
+				Expect(resource.GetRabbitMQVersion()).To(Equal("3.13.0"))
+			})
+
+			It("returns VersionNotAnnotated when annotation is missing", func() {
+				resource := generateRabbitmqClusterObject("rabbit-version-missing")
+				resource.Annotations = map[string]string{}
+				Expect(resource.GetRabbitMQVersion()).To(Equal(VersionNotAnnotated))
+			})
+
+			It("returns VersionNotAnnotated when annotations are nil", func() {
+				resource := generateRabbitmqClusterObject("rabbit-version-nil")
+				resource.Annotations = nil
+				Expect(resource.GetRabbitMQVersion()).To(Equal(VersionNotAnnotated))
+			})
+		})
+
+		Describe("GetErlangVersion", func() {
+			It("returns the correct version when annotated", func() {
+				resource := generateRabbitmqClusterObject("erlang-version")
+				resource.Annotations = map[string]string{
+					ErlangVersionAnnotation: "26.2.1",
+				}
+				Expect(resource.GetErlangVersion()).To(Equal("26.2.1"))
+			})
+
+			It("returns VersionNotAnnotated when annotation is missing", func() {
+				resource := generateRabbitmqClusterObject("erlang-version-missing")
+				resource.Annotations = map[string]string{}
+				Expect(resource.GetErlangVersion()).To(Equal(VersionNotAnnotated))
+			})
+
+			It("returns VersionNotAnnotated when annotations are nil", func() {
+				resource := generateRabbitmqClusterObject("erlang-version-nil")
+				resource.Annotations = nil
+				Expect(resource.GetErlangVersion()).To(Equal(VersionNotAnnotated))
 			})
 		})
 
@@ -180,10 +262,10 @@ var _ = Describe("RabbitmqCluster", func() {
 							Namespace: "default",
 						},
 						Spec: RabbitmqClusterSpec{
-							Replicas:                      pointer.Int32Ptr(3),
+							Replicas:                      ptr.To(int32(3)),
 							Image:                         "rabbitmq-image-from-cr",
 							ImagePullSecrets:              []corev1.LocalObjectReference{{Name: "my-super-secret"}},
-							TerminationGracePeriodSeconds: pointer.Int64Ptr(0),
+							TerminationGracePeriodSeconds: ptr.To(int64(0)),
 							Service: RabbitmqClusterServiceSpec{
 								Type: "NodePort",
 								Annotations: map[string]string{
@@ -409,6 +491,31 @@ var _ = Describe("RabbitmqCluster", func() {
 					Expect(fetchedRabbit.VaultDefaultUserSecretEnabled()).To(BeFalse())
 					Expect(fetchedRabbit.Spec.SecretBackend.Vault.DefaultUserSecretEnabled()).To(BeFalse())
 					Expect(fetchedRabbit.VaultTLSEnabled()).To(BeTrue())
+					Expect(fetchedRabbit.Spec.SecretBackend.Vault.RootCAEnabled()).To(BeFalse())
+					Expect(fetchedRabbit.Spec.SecretBackend.Vault.TLSEnabled()).To(BeTrue())
+				})
+			})
+			When("only TLS is configured and root CA path is specified", func() {
+				It("sets vault configuration correctly", func() {
+					rabbit := generateRabbitmqClusterObject("rabbit-vault-tls-ca")
+					rabbit.Spec.SecretBackend.Vault = &VaultSpec{
+						Role: "test-role",
+						TLS: VaultTLSSpec{
+							PKIIssuerPath: "pki/issue/hashicorp-com",
+							PKIRootPath:   "pki-root/certs/ca",
+						},
+					}
+					Expect(k8sClient.Create(context.Background(), rabbit)).To(Succeed())
+					fetchedRabbit := &RabbitmqCluster{}
+					Expect(k8sClient.Get(context.Background(), getKey(rabbit), fetchedRabbit)).To(Succeed())
+
+					Expect(fetchedRabbit.Spec.SecretBackend.Vault.Role).To(Equal("test-role"))
+					Expect(fetchedRabbit.Spec.SecretBackend.Vault.TLS.PKIRootPath).To(Equal("pki-root/certs/ca"))
+					Expect(fetchedRabbit.VaultEnabled()).To(BeTrue())
+					Expect(fetchedRabbit.VaultDefaultUserSecretEnabled()).To(BeFalse())
+					Expect(fetchedRabbit.Spec.SecretBackend.Vault.DefaultUserSecretEnabled()).To(BeFalse())
+					Expect(fetchedRabbit.VaultTLSEnabled()).To(BeTrue())
+					Expect(fetchedRabbit.Spec.SecretBackend.Vault.RootCAEnabled()).To(BeTrue())
 					Expect(fetchedRabbit.Spec.SecretBackend.Vault.TLSEnabled()).To(BeTrue())
 				})
 			})
@@ -421,11 +528,11 @@ var _ = Describe("RabbitmqCluster", func() {
 			statefulset.Spec.Template.Spec.Containers = []corev1.Container{
 				{
 					Resources: corev1.ResourceRequirements{
-						Limits: map[corev1.ResourceName]resource.Quantity{
-							"memory": resource.MustParse("100Mi"),
+						Limits: map[corev1.ResourceName]k8sresource.Quantity{
+							"memory": k8sresource.MustParse("100Mi"),
 						},
-						Requests: map[corev1.ResourceName]resource.Quantity{
-							"memory": resource.MustParse("100Mi"),
+						Requests: map[corev1.ResourceName]k8sresource.Quantity{
+							"memory": k8sresource.MustParse("100Mi"),
 						},
 					},
 				},
@@ -443,19 +550,17 @@ var _ = Describe("RabbitmqCluster", func() {
 				Conditions:         nil,
 			}
 
-			endPoints := &corev1.Endpoints{
-				Subsets: []corev1.EndpointSubset{
+			endPointSlice := &discoveryv1.EndpointSlice{
+				Endpoints: []discoveryv1.Endpoint{
 					{
-						Addresses: []corev1.EndpointAddress{
-							{
-								IP: "127.0.0.1",
-							},
+						Addresses: []string{
+							"127.0.0.1",
 						},
 					},
 				},
 			}
 
-			rabbitmqClusterStatus.SetConditions([]runtime.Object{statefulset, endPoints})
+			rabbitmqClusterStatus.SetConditions([]runtime.Object{statefulset, endPointSlice})
 
 			Expect(rabbitmqClusterStatus.Conditions).To(HaveLen(4))
 			Expect(rabbitmqClusterStatus.Conditions[0].Type).To(Equal(status.AllReplicasReady))
@@ -510,9 +615,9 @@ func generateRabbitmqClusterObject(clusterName string) *RabbitmqCluster {
 			Namespace: "default",
 		},
 		Spec: RabbitmqClusterSpec{
-			Replicas:                      pointer.Int32Ptr(1),
-			TerminationGracePeriodSeconds: pointer.Int64Ptr(604800),
-			DelayStartSeconds:             pointer.Int32Ptr(30),
+			Replicas:                      ptr.To(int32(1)),
+			TerminationGracePeriodSeconds: ptr.To(int64(604800)),
+			DelayStartSeconds:             ptr.To(int32(30)),
 			Service: RabbitmqClusterServiceSpec{
 				Type: "ClusterIP",
 			},

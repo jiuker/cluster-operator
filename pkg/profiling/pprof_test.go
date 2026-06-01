@@ -3,12 +3,14 @@ package profiling_test
 import (
 	"context"
 	"fmt"
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	"github.com/rabbitmq/cluster-operator/pkg/profiling"
 	"io"
 	"net/http"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	"github.com/rabbitmq/cluster-operator/v2/pkg/profiling"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 var _ = Describe("Pprof", func() {
@@ -23,11 +25,12 @@ var _ = Describe("Pprof", func() {
 	BeforeEach(func() {
 		metricsEndpoint, err = getFreePort()
 		opts = ctrl.Options{
-			MetricsBindAddress: metricsEndpoint,
+			Metrics: server.Options{BindAddress: metricsEndpoint},
 		}
+		var o *ctrl.Options
+		o, err = profiling.AddDebugPprofEndpoints(&opts)
 		mgr, err = ctrl.NewManager(cfg, opts)
-		Expect(err).NotTo(HaveOccurred())
-		mgr, err = profiling.AddDebugPprofEndpoints(mgr)
+		opts = *o
 		Expect(err).NotTo(HaveOccurred())
 
 	})
@@ -43,7 +46,9 @@ var _ = Describe("Pprof", func() {
 		endpoint := fmt.Sprintf("http://%s/debug/pprof", metricsEndpoint)
 		resp, err := http.Get(endpoint)
 		Expect(err).NotTo(HaveOccurred())
-		defer resp.Body.Close()
+		defer func() {
+			_ = resp.Body.Close()
+		}()
 		Expect(resp.StatusCode).To(Equal(http.StatusOK))
 
 		body, err := io.ReadAll(resp.Body)

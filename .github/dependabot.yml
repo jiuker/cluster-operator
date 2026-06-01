@@ -2,6 +2,10 @@ version: 2
 updates:
 - package-ecosystem: "gomod"
   directory: "/"
+  groups:
+    all:
+      patterns:
+      - '*'
   schedule:
     interval: "daily"
   ignore:
@@ -13,3 +17,21 @@ updates:
       versions: ["0.19.x"]
     - dependency-name: "github.com/go-logr/logr"
       versions: ["0.2.x"]
+- package-ecosystem: "github-actions"
+  directory: "/"
+  groups:
+    actions:
+      patterns:
+      - '*'
+  schedule:
+    interval: "weekly"
+- package-ecosystem: "gomod"
+  directory: "/kubectl-rabbitmq/"
+  groups:
+    all:
+      patterns:
+      - '*'
+  schedule:
+    interval: "daily"
+  ignore:
+    - dependency-name: "github.com/rabbitmq/cluster-operator/v2"

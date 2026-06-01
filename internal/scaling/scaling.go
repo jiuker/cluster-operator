@@ -7,14 +7,14 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	rabbitmqv1beta1 "github.com/rabbitmq/cluster-operator/api/v1beta1"
+	rabbitmqv1beta1 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	k8sresource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -79,7 +79,7 @@ func (p PersistenceScaler) getClusterPVCs(ctx context.Context, rmq rabbitmqv1bet
 	var pvcs []*corev1.PersistentVolumeClaim
 
 	var i int32
-	for i = 0; i < pointer.Int32Deref(rmq.Spec.Replicas, 1); i++ {
+	for i = range ptr.Deref(rmq.Spec.Replicas, 1) {
 		pvc, err := p.Client.CoreV1().PersistentVolumeClaims(rmq.Namespace).Get(ctx, rmq.PVCName(int(i)), metav1.GetOptions{})
 		if client.IgnoreNotFound(err) != nil {
 			logErr := fmt.Errorf("failed to get PVC from Kubernetes API: %w", err)
@@ -192,7 +192,7 @@ func (p PersistenceScaler) scaleUpPVCs(ctx context.Context, rmq rabbitmqv1beta1.
 }
 
 func retryWithInterval(logger logr.Logger, msg string, retry int, interval time.Duration, f func() bool) (err error) {
-	for i := 0; i < retry; i++ {
+	for i := range retry {
 		if ok := f(); ok {
 			return
 		}

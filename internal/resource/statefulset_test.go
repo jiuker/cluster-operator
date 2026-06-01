@@ -13,17 +13,16 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gstruct"
-	rabbitmqv1beta1 "github.com/rabbitmq/cluster-operator/api/v1beta1"
-	"github.com/rabbitmq/cluster-operator/internal/resource"
+	rabbitmqv1beta1 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
+	"github.com/rabbitmq/cluster-operator/v2/internal/resource"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8sresource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	defaultscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 var _ = Describe("StatefulSet", func() {
@@ -113,7 +112,7 @@ var _ = Describe("StatefulSet", func() {
 				statefulSet := obj.(*appsv1.StatefulSet)
 
 				expectedPersistentVolumeClaim := corev1.PersistentVolumeClaim{
-					ObjectMeta: v1.ObjectMeta{
+					ObjectMeta: metav1.ObjectMeta{
 						Name:      "persistence",
 						Namespace: instance.Namespace,
 						Labels: map[string]string{
@@ -121,21 +120,21 @@ var _ = Describe("StatefulSet", func() {
 							"app.kubernetes.io/component": "rabbitmq",
 							"app.kubernetes.io/part-of":   "rabbitmq",
 						},
-						OwnerReferences: []v1.OwnerReference{
+						OwnerReferences: []metav1.OwnerReference{
 							{
 								APIVersion:         "rabbitmq.com/v1beta1",
 								Kind:               "RabbitmqCluster",
 								Name:               instance.Name,
 								UID:                "",
-								Controller:         pointer.BoolPtr(true),
-								BlockOwnerDeletion: pointer.BoolPtr(false),
+								Controller:         ptr.To(true),
+								BlockOwnerDeletion: ptr.To(false),
 							},
 						},
 						Annotations: map[string]string{},
 					},
 					Spec: corev1.PersistentVolumeClaimSpec{
 						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-						Resources: corev1.ResourceRequirements{
+						Resources: corev1.VolumeResourceRequirements{
 							Requests: map[corev1.ResourceName]k8sresource.Quantity{
 								corev1.ResourceStorage: q,
 							},
@@ -161,7 +160,7 @@ var _ = Describe("StatefulSet", func() {
 									Namespace: instance.Namespace,
 								},
 								Spec: corev1.PersistentVolumeClaimSpec{
-									Resources: corev1.ResourceRequirements{
+									Resources: corev1.VolumeResourceRequirements{
 										Requests: corev1.ResourceList{
 											corev1.ResourceStorage: k8sresource.MustParse("10Gi"),
 										},
@@ -267,7 +266,7 @@ var _ = Describe("StatefulSet", func() {
 			stsBuilder := builder.StatefulSet()
 			Expect(stsBuilder.Update(statefulSet)).To(Succeed())
 
-			Expect(len(statefulSet.OwnerReferences)).To(Equal(1))
+			Expect(statefulSet.OwnerReferences).To(HaveLen(1))
 			Expect(statefulSet.OwnerReferences[0].Name).To(Equal(builder.Instance.Name))
 		})
 
@@ -276,7 +275,7 @@ var _ = Describe("StatefulSet", func() {
 			Expect(stsBuilder.Update(statefulSet)).To(Succeed())
 			updateStrategy := appsv1.StatefulSetUpdateStrategy{
 				RollingUpdate: &appsv1.RollingUpdateStatefulSetStrategy{
-					Partition: pointer.Int32Ptr(0),
+					Partition: ptr.To(int32(0)),
 				},
 				Type: appsv1.RollingUpdateStatefulSetStrategyType,
 			}
@@ -412,7 +411,7 @@ var _ = Describe("StatefulSet", func() {
 				It("updates Prometheus port", func() {
 					stsBuilder.Instance.Spec.TLS.SecretName = "tls-secret"
 					Expect(stsBuilder.Update(statefulSet)).To(Succeed())
-					expectedPodAnnotations := make(map[string]string, 0)
+					expectedPodAnnotations := make(map[string]string)
 					Expect(statefulSet.Spec.Template.Annotations).To(Equal(expectedPodAnnotations))
 				})
 			})
@@ -530,11 +529,15 @@ var _ = Describe("StatefulSet", func() {
 										LocalObjectReference: corev1.LocalObjectReference{
 											Name: "tls-secret",
 										},
-										Optional: pointer.BoolPtr(true),
+										Optional: ptr.To(true),
+										Items: []corev1.KeyToPath{
+											{Key: "tls.crt", Path: "tls.crt"},
+											{Key: "tls.key", Path: "tls.key"},
+										},
 									},
 								},
 							},
-							DefaultMode: pointer.Int32Ptr(400),
+							DefaultMode: ptr.To(int32(400)),
 						},
 					},
 				}))
@@ -592,6 +595,29 @@ var _ = Describe("StatefulSet", func() {
 				}))
 			})
 
+			It("opens tls ports when web-mqtt, web-stomp and web-amqp are configured", func() {
+				instance.Spec.TLS.SecretName = "tls-secret"
+				instance.Spec.Rabbitmq.AdditionalPlugins = []rabbitmqv1beta1.Plugin{"rabbitmq_web_mqtt", "rabbitmq_web_stomp", "rabbitmq_web_amqp"}
+				Expect(stsBuilder.Update(statefulSet)).To(Succeed())
+
+				rabbitmqContainerSpec := extractContainer(statefulSet.Spec.Template.Spec.Containers, "rabbitmq")
+
+				Expect(rabbitmqContainerSpec.Ports).To(ContainElements([]corev1.ContainerPort{
+					{
+						Name:          "web-mqtt-tls",
+						ContainerPort: 15676,
+					},
+					{
+						Name:          "web-stomp-tls",
+						ContainerPort: 15673,
+					},
+					{
+						Name:          "web-amqp-tls",
+						ContainerPort: 15677,
+					},
+				}))
+			})
+
 			It("opens tls port for stream when rabbitmq_multi_dc_replication is enabled", func() {
 				instance.Spec.TLS.SecretName = "tls-secret"
 				instance.Spec.Rabbitmq.AdditionalPlugins = []rabbitmqv1beta1.Plugin{"rabbitmq_multi_dc_replication"}
@@ -607,26 +633,19 @@ var _ = Describe("StatefulSet", func() {
 				}))
 			})
 
-			When("Mutual TLS (same secret) is enabled", func() {
-				It("opens tls ports when rabbitmq_web_mqtt and rabbitmq_web_stomp are configured", func() {
-					instance.Spec.TLS.SecretName = "tls-secret"
-					instance.Spec.TLS.CaSecretName = "tls-secret"
-					instance.Spec.Rabbitmq.AdditionalPlugins = []rabbitmqv1beta1.Plugin{"rabbitmq_web_mqtt", "rabbitmq_web_stomp"}
-					Expect(stsBuilder.Update(statefulSet)).To(Succeed())
+			It("opens tls port for stream when rabbitmq_stream_management is enabled", func() {
+				instance.Spec.TLS.SecretName = "tls-secret"
+				instance.Spec.Rabbitmq.AdditionalPlugins = []rabbitmqv1beta1.Plugin{"rabbitmq_stream_management"}
+				Expect(stsBuilder.Update(statefulSet)).To(Succeed())
 
-					rabbitmqContainerSpec := extractContainer(statefulSet.Spec.Template.Spec.Containers, "rabbitmq")
+				rabbitmqContainerSpec := extractContainer(statefulSet.Spec.Template.Spec.Containers, "rabbitmq")
 
-					Expect(rabbitmqContainerSpec.Ports).To(ContainElements([]corev1.ContainerPort{
-						{
-							Name:          "web-mqtt-tls",
-							ContainerPort: 15676,
-						},
-						{
-							Name:          "web-stomp-tls",
-							ContainerPort: 15673,
-						},
-					}))
-				})
+				Expect(rabbitmqContainerSpec.Ports).To(ContainElements([]corev1.ContainerPort{
+					{
+						Name:          "streams",
+						ContainerPort: 5551,
+					},
+				}))
 			})
 
 			When("Mutual TLS (different secret) is enabled", func() {
@@ -645,7 +664,11 @@ var _ = Describe("StatefulSet", func() {
 											LocalObjectReference: corev1.LocalObjectReference{
 												Name: "tls-secret",
 											},
-											Optional: pointer.BoolPtr(true),
+											Optional: ptr.To(true),
+											Items: []corev1.KeyToPath{
+												{Key: "tls.crt", Path: "tls.crt"},
+												{Key: "tls.key", Path: "tls.key"},
+											},
 										},
 									},
 									{
@@ -653,11 +676,14 @@ var _ = Describe("StatefulSet", func() {
 											LocalObjectReference: corev1.LocalObjectReference{
 												Name: "mutual-tls-secret",
 											},
-											Optional: pointer.BoolPtr(true),
+											Optional: ptr.To(true),
+											Items: []corev1.KeyToPath{
+												{Key: "ca.crt", Path: "ca.crt"},
+											},
 										},
 									},
 								},
-								DefaultMode: pointer.Int32Ptr(400),
+								DefaultMode: ptr.To(int32(400)),
 							},
 						},
 					}))
@@ -693,7 +719,8 @@ var _ = Describe("StatefulSet", func() {
 				})
 
 				It("disables non tls ports for mqtt, stomp and stream if enabled", func() {
-					instance.Spec.Rabbitmq.AdditionalPlugins = []rabbitmqv1beta1.Plugin{"rabbitmq_mqtt", "rabbitmq_stomp", "rabbitmq_stream", "rabbitmq_multi_dc_replication"}
+					instance.Spec.Rabbitmq.AdditionalPlugins = []rabbitmqv1beta1.Plugin{"rabbitmq_mqtt", "rabbitmq_stomp",
+						"rabbitmq_stream", "rabbitmq_multi_dc_replication", "rabbitmq_stream_management"}
 					Expect(stsBuilder.Update(statefulSet)).To(Succeed())
 
 					rabbitmqContainerSpec := extractContainer(statefulSet.Spec.Template.Spec.Containers, "rabbitmq")
@@ -778,10 +805,10 @@ var _ = Describe("StatefulSet", func() {
 			Expect(stsBuilder.Update(statefulSet)).To(Succeed())
 
 			resources := statefulSet.Spec.Template.Spec.InitContainers[0].Resources
-			Expect(resources.Requests["cpu"]).To(Equal(k8sresource.MustParse("100m")))
-			Expect(resources.Requests["memory"]).To(Equal(k8sresource.MustParse("500Mi")))
-			Expect(resources.Limits["cpu"]).To(Equal(k8sresource.MustParse("100m")))
-			Expect(resources.Limits["memory"]).To(Equal(k8sresource.MustParse("500Mi")))
+			Expect(resources.Requests["cpu"]).To(Equal(k8sresource.MustParse("20m")))
+			Expect(resources.Requests["memory"]).To(Equal(k8sresource.MustParse("64Mi")))
+			Expect(resources.Limits["cpu"]).To(Equal(k8sresource.MustParse("20m")))
+			Expect(resources.Limits["memory"]).To(Equal(k8sresource.MustParse("64Mi")))
 		})
 
 		It("exposes required Container Ports", func() {
@@ -816,8 +843,10 @@ var _ = Describe("StatefulSet", func() {
 			Entry(nil, "rabbitmq_web_mqtt", "web-mqtt", 15675),
 			Entry(nil, "rabbitmq_stomp", "stomp", 61613),
 			Entry(nil, "rabbitmq_web_stomp", "web-stomp", 15674),
+			Entry(nil, "rabbitmq_web_amqp", "web-amqp", 15678),
 			Entry(nil, "rabbitmq_stream", "stream", 5552),
 			Entry(nil, "rabbitmq_multi_dc_replication", "stream", 5552),
+			Entry(nil, "rabbitmq_stream_management", "stream", 5552),
 		)
 
 		It("uses required Environment Variables", func() {
@@ -867,6 +896,42 @@ var _ = Describe("StatefulSet", func() {
 
 			container := extractContainer(statefulSet.Spec.Template.Spec.Containers, "rabbitmq")
 			Expect(container.Env).To(ConsistOf(requiredEnvVariables))
+		})
+
+		It("sets default StartupProbe with rabbitmqctl eval command", func() {
+			stsBuilder := builder.StatefulSet()
+			Expect(stsBuilder.Update(statefulSet)).To(Succeed())
+
+			container := extractContainer(statefulSet.Spec.Template.Spec.Containers, "rabbitmq")
+			Expect(container.StartupProbe).NotTo(BeNil())
+			Expect(container.StartupProbe.ProbeHandler.Exec).NotTo(BeNil())
+			Expect(container.StartupProbe.ProbeHandler.Exec.Command).To(Equal([]string{
+				"/bin/bash", "-c",
+				"rabbitmqctl eval 'rabbit_nodes:reached_target_cluster_size().' | grep -q '^true$'",
+			}))
+			Expect(container.StartupProbe.InitialDelaySeconds).To(BeEquivalentTo(10))
+			Expect(container.StartupProbe.TimeoutSeconds).To(BeEquivalentTo(5))
+			Expect(container.StartupProbe.PeriodSeconds).To(BeEquivalentTo(10))
+			Expect(container.StartupProbe.FailureThreshold).To(BeEquivalentTo(30))
+		})
+
+		Context("ExternalSecret", func() {
+			When("SecretBackend.ExternalSecret is set", func() {
+				JustBeforeEach(func() {
+					Expect(stsBuilder.Update(statefulSet)).To(Succeed())
+				})
+				BeforeEach(func() {
+					instance.Spec.SecretBackend.ExternalSecret.Name = "my-secret"
+				})
+
+				It("does not project default user secret to rabbitmq-confd volume", func() {
+					rabbitmqConfdVolume := extractVolume(statefulSet.Spec.Template.Spec.Volumes, "rabbitmq-confd")
+					defaultUserSecret := extractProjectedSecret(rabbitmqConfdVolume, "foo-default-user")
+					Expect(defaultUserSecret.Secret).To(BeNil())
+				})
+
+			})
+
 		})
 
 		Context("Vault", func() {
@@ -957,7 +1022,7 @@ default_pass = {{ .Data.data.password }}
 					})
 					When("disabled", func() {
 						BeforeEach(func() {
-							instance.Spec.SecretBackend.Vault.DefaultUserUpdaterImage = pointer.String("")
+							instance.Spec.SecretBackend.Vault.DefaultUserUpdaterImage = ptr.To("")
 						})
 						It("does not deploy sidecar container", func() {
 							Expect(sidecar).To(Equal(corev1.Container{}))
@@ -966,7 +1031,7 @@ default_pass = {{ .Data.data.password }}
 
 					When("enabled", func() {
 						BeforeEach(func() {
-							instance.Spec.SecretBackend.Vault.DefaultUserUpdaterImage = pointer.String("updater-img")
+							instance.Spec.SecretBackend.Vault.DefaultUserUpdaterImage = ptr.To("updater-img")
 						})
 						It("configures default credential updater sidecar container", func() {
 							expectedContainer := corev1.Container{
@@ -1064,7 +1129,15 @@ default_pass = {{ .Data.data.password }}
 						Expect(a).To(HaveKeyWithValue("vault.hashicorp.com/agent-inject-template-tls.crt", `
 {{- with secret "pki/issue/vmware-com" "common_name=myrabbit.foo-namespace.svc" "alt_names=myrabbit-server-0.myrabbit-nodes.foo-namespace" "ip_sans=" -}}
 {{ .Data.certificate }}
-{{- end }}`))
+{{- if .Data.ca_chain -}}
+{{- $lastintermediatecertindex := len .Data.ca_chain | subtract 1 -}}
+{{ range $index, $cacert := .Data.ca_chain }}
+{{ if (lt $index $lastintermediatecertindex) }}
+{{ $cacert }}
+{{ end }}
+{{ end }}
+{{- end -}}
+{{- end -}}`))
 						Expect(a).To(HaveKeyWithValue("vault.hashicorp.com/agent-inject-template-tls.key", `
 {{- with secret "pki/issue/vmware-com" "common_name=myrabbit.foo-namespace.svc" "alt_names=myrabbit-server-0.myrabbit-nodes.foo-namespace" "ip_sans=" -}}
 {{ .Data.private_key }}
@@ -1080,6 +1153,7 @@ default_pass = {{ .Data.data.password }}
 						instance.Spec.SecretBackend.Vault.TLS.CommonName = "myrabbit.com"
 						instance.Spec.SecretBackend.Vault.TLS.AltNames = "alt1,alt2"
 						instance.Spec.SecretBackend.Vault.TLS.IpSans = "9.9.9.9"
+						instance.Spec.SecretBackend.Vault.TLS.PKIRootPath = "pki-root/certs/ca"
 						Expect(stsBuilder.Update(statefulSet)).To(Succeed())
 					})
 
@@ -1088,14 +1162,22 @@ default_pass = {{ .Data.data.password }}
 						Expect(a).To(HaveKeyWithValue("vault.hashicorp.com/agent-inject-template-tls.crt", `
 {{- with secret "pki/issue/vmware-com" "common_name=myrabbit.com" "alt_names=myrabbit-server-0.myrabbit-nodes.foo-namespace,alt1,alt2" "ip_sans=9.9.9.9" -}}
 {{ .Data.certificate }}
-{{- end }}`))
+{{- if .Data.ca_chain -}}
+{{- $lastintermediatecertindex := len .Data.ca_chain | subtract 1 -}}
+{{ range $index, $cacert := .Data.ca_chain }}
+{{ if (lt $index $lastintermediatecertindex) }}
+{{ $cacert }}
+{{ end }}
+{{ end }}
+{{- end -}}
+{{- end -}}`))
 						Expect(a).To(HaveKeyWithValue("vault.hashicorp.com/agent-inject-template-tls.key", `
 {{- with secret "pki/issue/vmware-com" "common_name=myrabbit.com" "alt_names=myrabbit-server-0.myrabbit-nodes.foo-namespace,alt1,alt2" "ip_sans=9.9.9.9" -}}
 {{ .Data.private_key }}
 {{- end }}`))
 						Expect(a).To(HaveKeyWithValue("vault.hashicorp.com/agent-inject-template-ca.crt", `
-{{- with secret "pki/issue/vmware-com" "common_name=myrabbit.com" "alt_names=myrabbit-server-0.myrabbit-nodes.foo-namespace,alt1,alt2" "ip_sans=9.9.9.9" -}}
-{{ .Data.issuing_ca }}
+{{- with secret "pki-root/certs/ca" -}}
+{{ .Data.certificate }}
 {{- end }}`))
 					})
 				})
@@ -1104,10 +1186,11 @@ default_pass = {{ .Data.data.password }}
 
 		Context("Rabbitmq container volume mounts", func() {
 			DescribeTable("Volume mounts depending on spec configuration and '/var/lib/rabbitmq/' always mounts before '/var/lib/rabbitmq/mnesia/' ",
-				func(rabbitmqEnv, advancedConfig string) {
+				func(rabbitmqEnv, advancedConfig, erlInet string) {
 					stsBuilder := builder.StatefulSet()
 					stsBuilder.Instance.Spec.Rabbitmq.EnvConfig = rabbitmqEnv
 					stsBuilder.Instance.Spec.Rabbitmq.AdvancedConfig = advancedConfig
+					stsBuilder.Instance.Spec.Rabbitmq.ErlangInetConfig = erlInet
 					Expect(stsBuilder.Update(statefulSet)).To(Succeed())
 
 					expectedVolumeMounts := []corev1.VolumeMount{
@@ -1130,6 +1213,11 @@ default_pass = {{ .Data.data.password }}
 							Name: "server-conf", MountPath: "/etc/rabbitmq/advanced.config", SubPath: "advanced.config"})
 					}
 
+					if erlInet != "" {
+						expectedVolumeMounts = append(expectedVolumeMounts, corev1.VolumeMount{
+							Name: "server-conf", MountPath: "/etc/rabbitmq/erl_inetrc", SubPath: "erl_inetrc"})
+					}
+
 					container := extractContainer(statefulSet.Spec.Template.Spec.Containers, "rabbitmq")
 					Expect(container.VolumeMounts).To(ConsistOf(expectedVolumeMounts))
 					Expect(container.VolumeMounts[0]).To(Equal(corev1.VolumeMount{
@@ -1141,18 +1229,23 @@ default_pass = {{ .Data.data.password }}
 						MountPath: "/var/lib/rabbitmq/mnesia/",
 					}))
 				},
-				Entry("Both env and advanced configs are set", "rabbitmq-env-is-set", "advanced-config-is-set"),
-				Entry("Only env config is set", "rabbitmq-env-is-set", ""),
-				Entry("Only advanced config is set", "", "advanced-config-is-set"),
-				Entry("No configs are set", "", ""),
+				Entry("All env + advanced + erl-inet configs are set", "rabbitmq-env-is-set", "advanced-config-is-set", "erl-inet-rc-is-set"),
+				Entry("Both env and advanced configs are set", "rabbitmq-env-is-set", "advanced-config-is-set", ""),
+				Entry("Both advanced and erl-inet configs are set", "", "advanced-config-is-set", "erl-inet-rc-is-set"),
+				Entry("Both env and erl-inet configs are set", "rabbitmq-env-is-set", "", "erl-inet-rc-is-set"),
+				Entry("Only env config is set", "rabbitmq-env-is-set", "", ""),
+				Entry("Only advanced config is set", "", "advanced-config-is-set", ""),
+				Entry("Only erl-inet config is set", "", "", "erl-inet-rc-is-set"),
+				Entry("No configs are set", "", "", ""),
 			)
 		})
 
 		Context("Volumes", func() {
-			DescribeTable("Volumes based on user configuration", func(rabbitmqEnv, advancedConfig string) {
+			DescribeTable("Volumes based on user configuration", func(rabbitmqEnv, advancedConfig, erlInetRc string) {
 				stsBuilder := builder.StatefulSet()
 				stsBuilder.Instance.Spec.Rabbitmq.EnvConfig = rabbitmqEnv
 				stsBuilder.Instance.Spec.Rabbitmq.AdvancedConfig = advancedConfig
+				stsBuilder.Instance.Spec.Rabbitmq.ErlangInetConfig = erlInetRc
 				Expect(stsBuilder.Update(statefulSet)).To(Succeed())
 
 				expectedVolumes := []corev1.Volume{
@@ -1243,7 +1336,7 @@ default_pass = {{ .Data.data.password }}
 					},
 				}
 
-				if rabbitmqEnv != "" || advancedConfig != "" {
+				if rabbitmqEnv != "" || advancedConfig != "" || erlInetRc != "" {
 					expectedVolumes = append(expectedVolumes, corev1.Volume{
 						Name: "server-conf",
 						VolumeSource: corev1.VolumeSource{
@@ -1256,10 +1349,14 @@ default_pass = {{ .Data.data.password }}
 				Expect(statefulSet.Spec.Template.Spec.Volumes).To(ConsistOf(expectedVolumes))
 
 			},
-				Entry("Both env and advanced configs are set", "rabbitmq-env-is-set", "advanced-config-is-set"),
-				Entry("Only env config is set", "rabbitmq-env-is-set", ""),
-				Entry("Only advanced config is set", "", "advanced-config-is-set"),
-				Entry("No configs are set", "", ""),
+				Entry("All env + advanced + erl-inet configs are set", "rabbitmq-env-is-set", "advanced-config-is-set", "erl-inet-rc-is-set"),
+				Entry("Both env and advanced configs are set", "rabbitmq-env-is-set", "advanced-config-is-set", ""),
+				Entry("Both advanced and erl-inet configs are set", "", "advanced-config-is-set", "erl-inet-rc-is-set"),
+				Entry("Both env and erl-inet configs are set", "rabbitmq-env-is-set", "", "erl-inet-rc-is-set"),
+				Entry("Only env config is set", "rabbitmq-env-is-set", "", ""),
+				Entry("Only advanced config is set", "", "advanced-config-is-set", ""),
+				Entry("Only erl-inet config is set", "", "", "erl-inet-rc-is-set"),
+				Entry("No configs are set", "", "", ""),
 			)
 
 			It("defines an emptyDir volume when storage == 0", func() {
@@ -1273,6 +1370,30 @@ default_pass = {{ .Data.data.password }}
 					Name: "persistence",
 					VolumeSource: corev1.VolumeSource{
 						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				}
+
+				Expect(statefulSet.Spec.Template.Spec.Volumes).To(ContainElement(expectedVolume))
+			})
+
+			It("defines an emptyDir volume with sizeLimit and medium when storage == 0 and emptyDir config received", func() {
+				zero, _ := k8sresource.ParseQuantity("0")
+
+				stsBuilder := builder.StatefulSet()
+				stsBuilder.Instance.Spec.Persistence.Storage = &zero
+				stsBuilder.Instance.Spec.Persistence.EmptyDir = &rabbitmqv1beta1.RabbitmqClusterEmptyDirSpec{
+					SizeLimit: ptr.To(k8sresource.MustParse("500Mi")),
+					Medium:    corev1.StorageMediumMemory,
+				}
+				Expect(stsBuilder.Update(statefulSet)).To(Succeed())
+
+				expectedVolume := corev1.Volume{
+					Name: "persistence",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{
+							SizeLimit: ptr.To(k8sresource.MustParse("500Mi")),
+							Medium:    corev1.StorageMediumMemory,
+						},
 					},
 				}
 
@@ -1294,6 +1415,28 @@ default_pass = {{ .Data.data.password }}
 			Expect(*statefulSet.Spec.Template.Spec.AutomountServiceAccountToken).To(BeTrue())
 		})
 
+		When("RabbitMQ version is 4.1.0 or greater", func() {
+			BeforeEach(func() {
+				instance.Annotations = map[string]string{
+					rabbitmqv1beta1.RabbitmqVersionAnnotation: "4.1.0",
+				}
+			})
+
+			It("still uses the correct service account", func() {
+				stsBuilder := builder.StatefulSet()
+				Expect(stsBuilder.Update(statefulSet)).To(Succeed())
+
+				Expect(statefulSet.Spec.Template.Spec.ServiceAccountName).To(Equal(instance.ChildResourceName("server")))
+			})
+
+			It("still mounts the service account token in its pods", func() {
+				stsBuilder := builder.StatefulSet()
+				Expect(stsBuilder.Update(statefulSet)).To(Succeed())
+
+				Expect(*statefulSet.Spec.Template.Spec.AutomountServiceAccountToken).To(BeTrue())
+			})
+		})
+
 		It("creates the required SecurityContext", func() {
 			stsBuilder := builder.StatefulSet()
 			Expect(stsBuilder.Update(statefulSet)).To(Succeed())
@@ -1301,8 +1444,12 @@ default_pass = {{ .Data.data.password }}
 			rmqUID := int64(999)
 
 			expectedPodSecurityContext := &corev1.PodSecurityContext{
-				FSGroup:   pointer.Int64(0),
-				RunAsUser: &rmqUID,
+				FSGroup:      ptr.To(int64(0)),
+				RunAsUser:    &rmqUID,
+				RunAsNonRoot: ptr.To(bool(true)),
+				SeccompProfile: &corev1.SeccompProfile{
+					Type: corev1.SeccompProfileTypeRuntimeDefault,
+				},
 			}
 
 			Expect(statefulSet.Spec.Template.Spec.SecurityContext).To(Equal(expectedPodSecurityContext))
@@ -1363,11 +1510,23 @@ default_pass = {{ .Data.data.password }}
 						SubPath:   "default_user.conf",
 					},
 				}),
+				"SecurityContext": BeEquivalentTo(&corev1.SecurityContext{
+					AllowPrivilegeEscalation: ptr.To(bool(false)),
+					Capabilities: &corev1.Capabilities{
+						Drop: []corev1.Capability{"ALL"},
+					},
+					Privileged:             ptr.To(bool(false)),
+					ReadOnlyRootFilesystem: ptr.To(bool(true)),
+					RunAsNonRoot:           ptr.To(bool(true)),
+					SeccompProfile: &corev1.SeccompProfile{
+						Type: corev1.SeccompProfileTypeRuntimeDefault,
+					},
+				}),
 			}))
 		})
 
 		It("sets TerminationGracePeriodSeconds in podTemplate as provided in instance spec", func() {
-			instance.Spec.TerminationGracePeriodSeconds = pointer.Int64Ptr(10)
+			instance.Spec.TerminationGracePeriodSeconds = ptr.To(int64(10))
 			builder = &resource.RabbitmqResourceBuilder{
 				Instance: &instance,
 				Scheme:   scheme,
@@ -1377,10 +1536,10 @@ default_pass = {{ .Data.data.password }}
 			Expect(stsBuilder.Update(statefulSet)).To(Succeed())
 
 			gracePeriodSeconds := statefulSet.Spec.Template.Spec.TerminationGracePeriodSeconds
-			Expect(gracePeriodSeconds).To(Equal(pointer.Int64Ptr(10)))
+			Expect(gracePeriodSeconds).To(Equal(ptr.To(int64(10))))
 
 			// TerminationGracePeriodSeconds is used to set commands timeouts in the preStop hook
-			expectedPreStopCommand := []string{"/bin/bash", "-c", "if [ ! -z \"$(cat /etc/pod-info/skipPreStopChecks)\" ]; then exit 0; fi; rabbitmq-upgrade await_online_quorum_plus_one -t 10; rabbitmq-upgrade await_online_synchronized_mirror -t 10; rabbitmq-upgrade drain -t 10"}
+			expectedPreStopCommand := []string{"/bin/bash", "-c", "if [ ! -z \"$(cat /etc/pod-info/skipPreStopChecks)\" ]; then exit 0; fi; rabbitmq-upgrade await_online_quorum_plus_one -t 10 && rabbitmq-upgrade await_online_synchronized_mirror -t 10 || true && rabbitmq-upgrade drain -t 10"}
 			Expect(statefulSet.Spec.Template.Spec.Containers[0].Lifecycle.PreStop.Exec.Command).To(Equal(expectedPreStopCommand))
 		})
 
@@ -1388,7 +1547,7 @@ default_pass = {{ .Data.data.password }}
 			stsBuilder := builder.StatefulSet()
 			Expect(stsBuilder.Update(statefulSet)).To(Succeed())
 
-			expectedPreStopCommand := []string{"/bin/bash", "-c", "if [ ! -z \"$(cat /etc/pod-info/skipPreStopChecks)\" ]; then exit 0; fi; rabbitmq-upgrade await_online_quorum_plus_one -t 604800; rabbitmq-upgrade await_online_synchronized_mirror -t 604800; rabbitmq-upgrade drain -t 604800"}
+			expectedPreStopCommand := []string{"/bin/bash", "-c", "if [ ! -z \"$(cat /etc/pod-info/skipPreStopChecks)\" ]; then exit 0; fi; rabbitmq-upgrade await_online_quorum_plus_one -t 604800 && rabbitmq-upgrade await_online_synchronized_mirror -t 604800 || true && rabbitmq-upgrade drain -t 604800"}
 
 			Expect(statefulSet.Spec.Template.Spec.Containers[0].Lifecycle.PreStop.Exec.Command).To(Equal(expectedPreStopCommand))
 		})
@@ -1440,8 +1599,8 @@ default_pass = {{ .Data.data.password }}
 				Expect(stsBuilder.Update(statefulSet)).To(Succeed())
 
 				container := extractContainer(statefulSet.Spec.Template.Spec.Containers, "rabbitmq")
-				Expect(len(container.Resources.Requests)).To(Equal(0))
-				Expect(len(container.Resources.Limits)).To(Equal(0))
+				Expect(container.Resources.Requests).To(BeEmpty())
+				Expect(container.Resources.Limits).To(BeEmpty())
 			})
 		})
 
@@ -1462,8 +1621,37 @@ default_pass = {{ .Data.data.password }}
 			})
 		})
 
+		It("sets the container security context", func() {
+			instance.Spec.Resources = &corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{},
+				Limits:   corev1.ResourceList{},
+			}
+
+			builder = &resource.RabbitmqResourceBuilder{
+				Instance: &instance,
+				Scheme:   scheme,
+			}
+
+			stsBuilder := builder.StatefulSet()
+			Expect(stsBuilder.Update(statefulSet)).To(Succeed())
+
+			container := extractContainer(statefulSet.Spec.Template.Spec.Containers, "rabbitmq")
+			Expect(container.SecurityContext).To(BeEquivalentTo(&corev1.SecurityContext{
+				AllowPrivilegeEscalation: ptr.To(bool(false)),
+				Capabilities: &corev1.Capabilities{
+					Drop: []corev1.Capability{"ALL"},
+				},
+				Privileged:             ptr.To(bool(false)),
+				ReadOnlyRootFilesystem: ptr.To(bool(true)),
+				RunAsNonRoot:           ptr.To(bool(true)),
+				SeccompProfile: &corev1.SeccompProfile{
+					Type: corev1.SeccompProfileTypeRuntimeDefault,
+				},
+			}))
+		})
+
 		It("sets the replica count of the StatefulSet to the instance value", func() {
-			instance.Spec.Replicas = pointer.Int32Ptr(3)
+			instance.Spec.Replicas = ptr.To(int32(3))
 			builder = &resource.RabbitmqResourceBuilder{
 				Instance: &instance,
 				Scheme:   scheme,
@@ -1478,13 +1666,13 @@ default_pass = {{ .Data.data.password }}
 
 			statefulSet.Spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{
 				{
-					ObjectMeta: v1.ObjectMeta{
+					ObjectMeta: metav1.ObjectMeta{
 						Name:      "persistence",
 						Namespace: instance.Namespace,
 					},
 					Spec: corev1.PersistentVolumeClaimSpec{
 						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-						Resources: corev1.ResourceRequirements{
+						Resources: corev1.VolumeResourceRequirements{
 							Requests: map[corev1.ResourceName]k8sresource.Quantity{
 								corev1.ResourceStorage: defaultCapacity,
 							},
@@ -1511,7 +1699,7 @@ default_pass = {{ .Data.data.password }}
 									Namespace: instance.Namespace,
 								},
 								Spec: corev1.PersistentVolumeClaimSpec{
-									Resources: corev1.ResourceRequirements{
+									Resources: corev1.VolumeResourceRequirements{
 										Requests: corev1.ResourceList{
 											corev1.ResourceStorage: seven,
 										},
@@ -1599,7 +1787,7 @@ default_pass = {{ .Data.data.password }}
 			It("overrides statefulSet.spec.replicas", func() {
 				instance.Spec.Override.StatefulSet = &rabbitmqv1beta1.StatefulSet{
 					Spec: &rabbitmqv1beta1.StatefulSetSpec{
-						Replicas: pointer.Int32Ptr(10),
+						Replicas: ptr.To(int32(10)),
 					},
 				}
 
@@ -1638,7 +1826,7 @@ default_pass = {{ .Data.data.password }}
 						UpdateStrategy: &appsv1.StatefulSetUpdateStrategy{
 							Type: "OnDelete",
 							RollingUpdate: &appsv1.RollingUpdateStatefulSetStrategy{
-								Partition: pointer.Int32Ptr(1),
+								Partition: ptr.To(int32(1)),
 							},
 						},
 					},
@@ -1648,6 +1836,22 @@ default_pass = {{ .Data.data.password }}
 				Expect(stsBuilder.Update(statefulSet)).To(Succeed())
 				Expect(string(statefulSet.Spec.UpdateStrategy.Type)).To(Equal("OnDelete"))
 				Expect(*statefulSet.Spec.UpdateStrategy.RollingUpdate.Partition).To(Equal(int32(1)))
+			})
+
+			It("overrides statefulSet.spec.persistentVolumeClaimRetentionPolicy", func() {
+				instance.Spec.Override.StatefulSet = &rabbitmqv1beta1.StatefulSet{
+					Spec: &rabbitmqv1beta1.StatefulSetSpec{
+						PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+							WhenDeleted: "Retain",
+							WhenScaled:  "Delete",
+						},
+					},
+				}
+
+				stsBuilder := builder.StatefulSet()
+				Expect(stsBuilder.Update(statefulSet)).To(Succeed())
+				Expect(string(statefulSet.Spec.PersistentVolumeClaimRetentionPolicy.WhenScaled)).To(Equal("Delete"))
+				Expect(string(statefulSet.Spec.PersistentVolumeClaimRetentionPolicy.WhenDeleted)).To(Equal("Retain"))
 			})
 
 			It("overrides the PVC list", func() {
@@ -1661,7 +1865,7 @@ default_pass = {{ .Data.data.password }}
 									Namespace: instance.Namespace,
 								},
 								Spec: corev1.PersistentVolumeClaimSpec{
-									Resources: corev1.ResourceRequirements{
+									Resources: corev1.VolumeResourceRequirements{
 										Requests: corev1.ResourceList{
 											corev1.ResourceStorage: *instance.Spec.Persistence.Storage,
 										},
@@ -1675,7 +1879,7 @@ default_pass = {{ .Data.data.password }}
 									Namespace: instance.Namespace,
 								},
 								Spec: corev1.PersistentVolumeClaimSpec{
-									Resources: corev1.ResourceRequirements{
+									Resources: corev1.VolumeResourceRequirements{
 										Requests: corev1.ResourceList{
 											corev1.ResourceStorage: *instance.Spec.Persistence.Storage,
 										},
@@ -1694,19 +1898,19 @@ default_pass = {{ .Data.data.password }}
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      "pert-1",
 							Namespace: "foo-namespace",
-							OwnerReferences: []v1.OwnerReference{
+							OwnerReferences: []metav1.OwnerReference{
 								{
 									APIVersion:         "rabbitmq.com/v1beta1",
 									Kind:               "RabbitmqCluster",
 									Name:               instance.Name,
 									UID:                "",
-									Controller:         pointer.BoolPtr(true),
-									BlockOwnerDeletion: pointer.BoolPtr(false),
+									Controller:         ptr.To(true),
+									BlockOwnerDeletion: ptr.To(false),
 								},
 							},
 						},
 						Spec: corev1.PersistentVolumeClaimSpec{
-							Resources: corev1.ResourceRequirements{
+							Resources: corev1.VolumeResourceRequirements{
 								Requests: corev1.ResourceList{
 									corev1.ResourceStorage: *instance.Spec.Persistence.Storage,
 								},
@@ -1718,19 +1922,19 @@ default_pass = {{ .Data.data.password }}
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      "pert-2",
 							Namespace: "foo-namespace",
-							OwnerReferences: []v1.OwnerReference{
+							OwnerReferences: []metav1.OwnerReference{
 								{
 									APIVersion:         "rabbitmq.com/v1beta1",
 									Kind:               "RabbitmqCluster",
 									Name:               instance.Name,
 									UID:                "",
-									Controller:         pointer.BoolPtr(true),
-									BlockOwnerDeletion: pointer.BoolPtr(false),
+									Controller:         ptr.To(true),
+									BlockOwnerDeletion: ptr.To(false),
 								},
 							},
 						},
 						Spec: corev1.PersistentVolumeClaimSpec{
-							Resources: corev1.ResourceRequirements{
+							Resources: corev1.VolumeResourceRequirements{
 								Requests: corev1.ResourceList{
 									corev1.ResourceStorage: *instance.Spec.Persistence.Storage,
 								},
@@ -1751,7 +1955,7 @@ default_pass = {{ .Data.data.password }}
 									Name: "pert-1",
 								},
 								Spec: corev1.PersistentVolumeClaimSpec{
-									Resources: corev1.ResourceRequirements{
+									Resources: corev1.VolumeResourceRequirements{
 										Requests: corev1.ResourceList{
 											corev1.ResourceStorage: *instance.Spec.Persistence.Storage,
 										},
@@ -1764,7 +1968,7 @@ default_pass = {{ .Data.data.password }}
 									Name: "pert-2",
 								},
 								Spec: corev1.PersistentVolumeClaimSpec{
-									Resources: corev1.ResourceRequirements{
+									Resources: corev1.VolumeResourceRequirements{
 										Requests: corev1.ResourceList{
 											corev1.ResourceStorage: *instance.Spec.Persistence.Storage,
 										},
@@ -1783,19 +1987,19 @@ default_pass = {{ .Data.data.password }}
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      "pert-1",
 							Namespace: "foo-namespace",
-							OwnerReferences: []v1.OwnerReference{
+							OwnerReferences: []metav1.OwnerReference{
 								{
 									APIVersion:         "rabbitmq.com/v1beta1",
 									Kind:               "RabbitmqCluster",
 									Name:               instance.Name,
 									UID:                "",
-									Controller:         pointer.BoolPtr(true),
-									BlockOwnerDeletion: pointer.BoolPtr(false),
+									Controller:         ptr.To(true),
+									BlockOwnerDeletion: ptr.To(false),
 								},
 							},
 						},
 						Spec: corev1.PersistentVolumeClaimSpec{
-							Resources: corev1.ResourceRequirements{
+							Resources: corev1.VolumeResourceRequirements{
 								Requests: corev1.ResourceList{
 									corev1.ResourceStorage: *instance.Spec.Persistence.Storage,
 								},
@@ -1807,19 +2011,19 @@ default_pass = {{ .Data.data.password }}
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      "pert-2",
 							Namespace: "foo-namespace",
-							OwnerReferences: []v1.OwnerReference{
+							OwnerReferences: []metav1.OwnerReference{
 								{
 									APIVersion:         "rabbitmq.com/v1beta1",
 									Kind:               "RabbitmqCluster",
 									Name:               instance.Name,
 									UID:                "",
-									Controller:         pointer.BoolPtr(true),
-									BlockOwnerDeletion: pointer.BoolPtr(false),
+									Controller:         ptr.To(true),
+									BlockOwnerDeletion: ptr.To(false),
 								},
 							},
 						},
 						Spec: corev1.PersistentVolumeClaimSpec{
-							Resources: corev1.ResourceRequirements{
+							Resources: corev1.VolumeResourceRequirements{
 								Requests: corev1.ResourceList{
 									corev1.ResourceStorage: *instance.Spec.Persistence.Storage,
 								},
@@ -2037,6 +2241,12 @@ default_pass = {{ .Data.data.password }}
 											SecurityContext: &corev1.SecurityContext{},
 										},
 									},
+									Containers: []corev1.Container{
+										{
+											Name:            "rabbitmq",
+											SecurityContext: &corev1.SecurityContext{},
+										},
+									},
 								},
 							},
 						},
@@ -2051,7 +2261,206 @@ default_pass = {{ .Data.data.password }}
 
 					Expect(statefulSet.Spec.Template.Spec.SecurityContext).To(BeNil())
 					Expect(statefulSet.Spec.Template.Spec.InitContainers[0].SecurityContext).To(BeNil())
+					Expect(statefulSet.Spec.Template.Spec.Containers[0].SecurityContext).To(BeNil())
 
+				})
+
+				It("can replace the default readinessProbe", func() {
+					instance.Spec.Override.StatefulSet = &rabbitmqv1beta1.StatefulSet{
+						Spec: &rabbitmqv1beta1.StatefulSetSpec{
+							Template: &rabbitmqv1beta1.PodTemplateSpec{
+								Spec: &corev1.PodSpec{
+									Containers: []corev1.Container{
+										{
+											Name: "rabbitmq",
+											ReadinessProbe: &corev1.Probe{
+												ProbeHandler: corev1.ProbeHandler{
+													Exec: &corev1.ExecAction{
+														Command: []string{"custom-readiness-probe", "arg1"},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					}
+
+					builder = &resource.RabbitmqResourceBuilder{
+						Instance: &instance,
+						Scheme:   scheme,
+					}
+					stsBuilder := builder.StatefulSet()
+					Expect(stsBuilder.Update(statefulSet)).To(Succeed())
+
+					Expect(statefulSet.Spec.Template.Spec.Containers[0].ReadinessProbe.ProbeHandler).To(Equal(
+						corev1.ProbeHandler{
+							Exec: &corev1.ExecAction{
+								Command: []string{"custom-readiness-probe", "arg1"},
+							},
+						},
+					))
+				})
+
+				It("can add/replace a LivenessProbe", func() {
+					// note: we currently don't have a default LivenessProbe
+					instance.Spec.Override.StatefulSet = &rabbitmqv1beta1.StatefulSet{
+						Spec: &rabbitmqv1beta1.StatefulSetSpec{
+							Template: &rabbitmqv1beta1.PodTemplateSpec{
+								Spec: &corev1.PodSpec{
+									Containers: []corev1.Container{
+										{
+											Name: "rabbitmq",
+											LivenessProbe: &corev1.Probe{
+												ProbeHandler: corev1.ProbeHandler{
+													Exec: &corev1.ExecAction{
+														Command: []string{"custom-liveness-probe", "arg1"},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					}
+
+					builder = &resource.RabbitmqResourceBuilder{
+						Instance: &instance,
+						Scheme:   scheme,
+					}
+					stsBuilder := builder.StatefulSet()
+					Expect(stsBuilder.Update(statefulSet)).To(Succeed())
+
+					Expect(statefulSet.Spec.Template.Spec.Containers[0].LivenessProbe.ProbeHandler).To(Equal(
+						corev1.ProbeHandler{
+							Exec: &corev1.ExecAction{
+								Command: []string{"custom-liveness-probe", "arg1"},
+							},
+						},
+					))
+
+				})
+
+				It("can add/replace a StartupProbe", func() {
+					instance.Spec.Override.StatefulSet = &rabbitmqv1beta1.StatefulSet{
+						Spec: &rabbitmqv1beta1.StatefulSetSpec{
+							Template: &rabbitmqv1beta1.PodTemplateSpec{
+								Spec: &corev1.PodSpec{
+									Containers: []corev1.Container{
+										{
+											Name: "rabbitmq",
+											StartupProbe: &corev1.Probe{
+												ProbeHandler: corev1.ProbeHandler{
+													Exec: &corev1.ExecAction{
+														Command: []string{"custom-startup-probe", "arg1"},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					}
+
+					builder = &resource.RabbitmqResourceBuilder{
+						Instance: &instance,
+						Scheme:   scheme,
+					}
+					stsBuilder := builder.StatefulSet()
+					Expect(stsBuilder.Update(statefulSet)).To(Succeed())
+
+					Expect(statefulSet.Spec.Template.Spec.Containers[0].StartupProbe.ProbeHandler).To(Equal(
+						corev1.ProbeHandler{
+							Exec: &corev1.ExecAction{
+								Command: []string{"custom-startup-probe", "arg1"},
+							},
+						},
+					))
+
+				})
+
+				Context("TopologySpreadConstraints composition", func() {
+					BeforeEach(func() {
+						instance.Spec.Override.StatefulSet = &rabbitmqv1beta1.StatefulSet{
+							Spec: &rabbitmqv1beta1.StatefulSetSpec{
+								Template: &rabbitmqv1beta1.PodTemplateSpec{
+									Spec: &corev1.PodSpec{},
+								},
+							},
+						}
+						builder = &resource.RabbitmqResourceBuilder{
+							Instance: &instance,
+							Scheme:   scheme,
+						}
+					})
+					When("Default TopologySpreadConstraints", func() {
+						It("uses the default", func() {
+							stsBuilder := builder.StatefulSet()
+							Expect(stsBuilder.Update(statefulSet)).To(Succeed())
+							Expect(statefulSet.Spec.Template.Spec.TopologySpreadConstraints).To(ConsistOf(
+								corev1.TopologySpreadConstraint{
+									MaxSkew:           1,
+									TopologyKey:       "topology.kubernetes.io/zone",
+									WhenUnsatisfiable: corev1.ScheduleAnyway,
+									LabelSelector: &metav1.LabelSelector{
+										MatchLabels: map[string]string{
+											"app.kubernetes.io/name": instance.Name,
+										},
+									},
+								},
+							))
+						})
+					})
+					When("Disable Default TopologySpreadConstraints", func() {
+						It("does not have any constraint", func() {
+							instance.Annotations = map[string]string{rabbitmqv1beta1.DisableDefaultTopologySpreadAnnotation: "true"}
+							stsBuilder := builder.StatefulSet()
+							Expect(stsBuilder.Update(statefulSet)).To(Succeed())
+							Expect(statefulSet.Spec.Template.Spec.TopologySpreadConstraints).To(BeEmpty())
+						})
+					})
+					When("Disable Default TopologySpreadConstraints and override has a value", func() {
+						It("overrides the default", func() {
+							instance.Annotations = map[string]string{rabbitmqv1beta1.DisableDefaultTopologySpreadAnnotation: "true"}
+							instance.Spec.Override.StatefulSet = &rabbitmqv1beta1.StatefulSet{
+								Spec: &rabbitmqv1beta1.StatefulSetSpec{
+									Template: &rabbitmqv1beta1.PodTemplateSpec{
+										Spec: &corev1.PodSpec{
+											TopologySpreadConstraints: []corev1.TopologySpreadConstraint{
+												{
+													MaxSkew:           1,
+													TopologyKey:       "my-topology",
+													WhenUnsatisfiable: corev1.DoNotSchedule,
+													LabelSelector: &metav1.LabelSelector{
+														MatchLabels: map[string]string{
+															"key": "value",
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							}
+							stsBuilder := builder.StatefulSet()
+							Expect(stsBuilder.Update(statefulSet)).To(Succeed())
+							Expect(statefulSet.Spec.Template.Spec.TopologySpreadConstraints).To(ConsistOf(
+								corev1.TopologySpreadConstraint{
+									MaxSkew:           1,
+									TopologyKey:       "my-topology",
+									WhenUnsatisfiable: corev1.DoNotSchedule,
+									LabelSelector: &metav1.LabelSelector{
+										MatchLabels: map[string]string{
+											"key": "value",
+										},
+									},
+								},
+							))
+						})
+					})
 				})
 
 				Context("Rabbitmq Container volume mounts", func() {
@@ -2220,11 +2629,11 @@ default_pass = {{ .Data.data.password }}
 
 			It("ensures override takes precedence when same property is set both at the top level and at the override level", func() {
 				instance.Spec.Image = "should-be-replaced-image"
-				instance.Spec.Replicas = pointer.Int32Ptr(2)
+				instance.Spec.Replicas = ptr.To(int32(2))
 
 				instance.Spec.Override.StatefulSet = &rabbitmqv1beta1.StatefulSet{
 					Spec: &rabbitmqv1beta1.StatefulSetSpec{
-						Replicas: pointer.Int32Ptr(4),
+						Replicas: ptr.To(int32(4)),
 						Template: &rabbitmqv1beta1.PodTemplateSpec{
 							Spec: &corev1.PodSpec{
 								Containers: []corev1.Container{
@@ -2285,16 +2694,16 @@ func extractProjectedSecret(volume corev1.Volume, secretName string) corev1.Volu
 func generateRabbitmqCluster() rabbitmqv1beta1.RabbitmqCluster {
 	storage := k8sresource.MustParse("10Gi")
 	return rabbitmqv1beta1.RabbitmqCluster{
-		ObjectMeta: v1.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      "foo",
 			Namespace: "foo-namespace",
 		},
 		Spec: rabbitmqv1beta1.RabbitmqClusterSpec{
-			Replicas:                      pointer.Int32Ptr(1),
+			Replicas:                      ptr.To(int32(1)),
 			Image:                         "rabbitmq-image-from-cr",
 			ImagePullSecrets:              []corev1.LocalObjectReference{{Name: "my-super-secret"}},
-			TerminationGracePeriodSeconds: pointer.Int64Ptr(604800),
-			DelayStartSeconds:             pointer.Int32Ptr(30),
+			TerminationGracePeriodSeconds: ptr.To(int64(604800)),
+			DelayStartSeconds:             ptr.To(int32(30)),
 			Service: rabbitmqv1beta1.RabbitmqClusterServiceSpec{
 				Type:        "this-is-a-service",
 				Annotations: map[string]string{},

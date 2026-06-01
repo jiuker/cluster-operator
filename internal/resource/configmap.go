@@ -10,6 +10,7 @@
 package resource
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -20,14 +21,16 @@ import (
 
 	"gopkg.in/ini.v1"
 
-	"github.com/rabbitmq/cluster-operator/internal/metadata"
+	"github.com/rabbitmq/cluster-operator/v2/internal/metadata"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
 	ServerConfigMapName = "server-conf"
 	defaultRabbitmqConf = `
+log.console = true
 queue_master_locator = min-masters
 disk_free_limit.absolute = 2GB
 cluster_partition_handling = pause_minority
@@ -59,10 +62,11 @@ prometheus.ssl.port      = 15691
 
 type ServerConfigMapBuilder struct {
 	*RabbitmqResourceBuilder
+	UpdateRequiresStsRestart bool
 }
 
 func (builder *RabbitmqResourceBuilder) ServerConfigMap() *ServerConfigMapBuilder {
-	return &ServerConfigMapBuilder{builder}
+	return &ServerConfigMapBuilder{builder, true}
 }
 
 func (builder *ServerConfigMapBuilder) Build() (client.Object, error) {
@@ -82,6 +86,7 @@ func (builder *ServerConfigMapBuilder) UpdateMayRequireStsRecreate() bool {
 
 func (builder *ServerConfigMapBuilder) Update(object client.Object) error {
 	configMap := object.(*corev1.ConfigMap)
+	previousConfigMap := configMap.DeepCopy()
 
 	ini.PrettySection = false // Remove trailing new line because rabbitmq.conf has only a default section.
 	operatorConfiguration, err := ini.Load([]byte(defaultRabbitmqConf))
@@ -98,7 +103,27 @@ func (builder *ServerConfigMapBuilder) Update(object client.Object) error {
 		return err
 	}
 
-	userConfiguration := ini.Empty(ini.LoadOptions{})
+	rmqProperties := builder.Instance.Spec.Rabbitmq
+	authMechsConfigured, err := areAuthMechanismsConfigued(rmqProperties.AdditionalConfig)
+	if err != nil {
+		return err
+	}
+	// By default, RabbitMQ configures the following SASL mechanisms:
+	// auth_mechanisms.1 = PLAIN
+	// auth_mechanisms.2 = AMQPLAIN
+	// auth_mechanisms.3 = ANONYMOUS
+	if !authMechsConfigured {
+		// Since the user didn't explicitly configure auth mechanisms, we disable
+		// ANONYMOUS logins because they should be disabled in production.
+		if _, err := defaultSection.NewKey("auth_mechanisms.1", "PLAIN"); err != nil {
+			return err
+		}
+		if _, err := defaultSection.NewKey("auth_mechanisms.2", "AMQPLAIN"); err != nil {
+			return err
+		}
+	}
+
+	userConfiguration := ini.Empty()
 	userConfigurationSection := userConfiguration.Section("")
 
 	if builder.Instance.TLSEnabled() {
@@ -141,6 +166,54 @@ func (builder *ServerConfigMapBuilder) Update(object client.Object) error {
 				}
 			}
 		}
+		if builder.Instance.AdditionalPluginEnabled("rabbitmq_web_mqtt") {
+			if _, err := userConfigurationSection.NewKey("web_mqtt.ssl.port", "15676"); err != nil {
+				return err
+			}
+			if _, err := userConfigurationSection.NewKey("web_mqtt.ssl.certfile", tlsCertPath); err != nil {
+				return err
+			}
+			if _, err := userConfigurationSection.NewKey("web_mqtt.ssl.keyfile", tlsKeyPath); err != nil {
+				return err
+			}
+			if builder.Instance.DisableNonTLSListeners() {
+				if _, err := userConfigurationSection.NewKey("web_mqtt.tcp.listener", "none"); err != nil {
+					return err
+				}
+			}
+		}
+		if builder.Instance.AdditionalPluginEnabled("rabbitmq_web_stomp") {
+			if _, err := userConfigurationSection.NewKey("web_stomp.ssl.port", "15673"); err != nil {
+				return err
+			}
+			if _, err := userConfigurationSection.NewKey("web_stomp.ssl.certfile", tlsCertPath); err != nil {
+				return err
+			}
+			if _, err := userConfigurationSection.NewKey("web_stomp.ssl.keyfile", tlsKeyPath); err != nil {
+				return err
+			}
+			if builder.Instance.DisableNonTLSListeners() {
+				if _, err := userConfigurationSection.NewKey("web_stomp.tcp.listener", "none"); err != nil {
+					return err
+				}
+			}
+		}
+		if builder.Instance.AdditionalPluginEnabled("rabbitmq_web_amqp") {
+			if !builder.Instance.DisableNonTLSListeners() {
+				if _, err := userConfigurationSection.NewKey("web_amqp.tcp.port", "15678"); err != nil {
+					return err
+				}
+			}
+			if _, err := userConfigurationSection.NewKey("web_amqp.tls.port", "15677"); err != nil {
+				return err
+			}
+			if _, err := userConfigurationSection.NewKey("web_amqp.tls.certfile", tlsCertPath); err != nil {
+				return err
+			}
+			if _, err := userConfigurationSection.NewKey("web_amqp.tls.keyfile", tlsKeyPath); err != nil {
+				return err
+			}
+		}
 		if builder.Instance.AdditionalPluginEnabled("rabbitmq_stream") {
 			if _, err := userConfigurationSection.NewKey("stream.listeners.ssl.default", "5551"); err != nil {
 				return err
@@ -170,41 +243,18 @@ func (builder *ServerConfigMapBuilder) Update(object client.Object) error {
 		}
 
 		if builder.Instance.AdditionalPluginEnabled("rabbitmq_web_mqtt") {
-			if _, err := userConfigurationSection.NewKey("web_mqtt.ssl.port", "15676"); err != nil {
-				return err
-			}
 			if _, err := userConfigurationSection.NewKey("web_mqtt.ssl.cacertfile", caCertPath); err != nil {
 				return err
 			}
-			if _, err := userConfigurationSection.NewKey("web_mqtt.ssl.certfile", tlsCertPath); err != nil {
-				return err
-			}
-			if _, err := userConfigurationSection.NewKey("web_mqtt.ssl.keyfile", tlsKeyPath); err != nil {
-				return err
-			}
-			if builder.Instance.DisableNonTLSListeners() {
-				if _, err := userConfigurationSection.NewKey("web_mqtt.tcp.listener", "none"); err != nil {
-					return err
-				}
-			}
 		}
 		if builder.Instance.AdditionalPluginEnabled("rabbitmq_web_stomp") {
-			if _, err := userConfigurationSection.NewKey("web_stomp.ssl.port", "15673"); err != nil {
-				return err
-			}
 			if _, err := userConfigurationSection.NewKey("web_stomp.ssl.cacertfile", caCertPath); err != nil {
 				return err
 			}
-			if _, err := userConfigurationSection.NewKey("web_stomp.ssl.certfile", tlsCertPath); err != nil {
+		}
+		if builder.Instance.AdditionalPluginEnabled("rabbitmq_web_amqp") {
+			if _, err := userConfigurationSection.NewKey("web_amqp.tls.cacertfile", caCertPath); err != nil {
 				return err
-			}
-			if _, err := userConfigurationSection.NewKey("web_stomp.ssl.keyfile", tlsKeyPath); err != nil {
-				return err
-			}
-			if builder.Instance.DisableNonTLSListeners() {
-				if _, err := userConfigurationSection.NewKey("web_stomp.tcp.listener", "none"); err != nil {
-					return err
-				}
 			}
 		}
 	}
@@ -228,7 +278,6 @@ func (builder *ServerConfigMapBuilder) Update(object client.Object) error {
 
 	rmqConfBuffer.Reset()
 
-	rmqProperties := builder.Instance.Spec.Rabbitmq
 	if err := userConfiguration.Append([]byte(rmqProperties.AdditionalConfig)); err != nil {
 		return fmt.Errorf("failed to append spec.rabbitmq.additionalConfig: %w", err)
 	}
@@ -239,13 +288,55 @@ func (builder *ServerConfigMapBuilder) Update(object client.Object) error {
 
 	configMap.Data["userDefinedConfiguration.conf"] = rmqConfBuffer.String()
 
+	if err := validateEnvConfig(rmqProperties.EnvConfig); err != nil {
+		return err
+	}
+
 	updateProperty(configMap.Data, "advanced.config", rmqProperties.AdvancedConfig)
 	updateProperty(configMap.Data, "rabbitmq-env.conf", rmqProperties.EnvConfig)
+	updateProperty(configMap.Data, "erl_inetrc", rmqProperties.ErlangInetConfig)
 
 	if err := controllerutil.SetControllerReference(builder.Instance, configMap, builder.Scheme); err != nil {
 		return fmt.Errorf("failed setting controller reference: %w", err)
 	}
 
+	updatedConfigMap := configMap.DeepCopy()
+	if err := removeConfigNotRequiringNodeRestart(previousConfigMap); err != nil {
+		return err
+	}
+	if err := removeConfigNotRequiringNodeRestart(updatedConfigMap); err != nil {
+		return err
+	}
+	if equality.Semantic.DeepEqual(previousConfigMap, updatedConfigMap) {
+		builder.UpdateRequiresStsRestart = false
+	}
+
+	return nil
+}
+
+// removeConfigNotRequiringNodeRestart removes configuration data that does not require a restart of RabbitMQ nodes.
+// For example, the target cluster size hint changes after adding nodes to a cluster, but there's no reason
+// to restart already running nodes.
+func removeConfigNotRequiringNodeRestart(configMap *corev1.ConfigMap) error {
+	operatorConf := configMap.Data["operatorDefaults.conf"]
+	if operatorConf == "" {
+		return nil
+	}
+	conf, err := ini.Load([]byte(operatorConf))
+	if err != nil {
+		return fmt.Errorf("failed to load operatorDefaults.conf when deciding whether to restart STS: %w", err)
+	}
+	defaultSection := conf.Section("")
+	for _, key := range defaultSection.KeyStrings() {
+		if strings.HasPrefix(key, "cluster_formation.target_cluster_size_hint") {
+			defaultSection.DeleteKey(key)
+		}
+	}
+	var b strings.Builder
+	if _, err := conf.WriteTo(&b); err != nil {
+		return fmt.Errorf("failed to write operatorDefaults.conf when deciding whether to restart STS: %w", err)
+	}
+	configMap.Data["operatorDefaults.conf"] = b.String()
 	return nil
 }
 
@@ -265,4 +356,28 @@ func removeHeadroom(memLimit int64) int64 {
 		return memLimit - 2*GiB
 	}
 	return memLimit - memLimit/5
+}
+
+func areAuthMechanismsConfigued(additionalConfig string) (bool, error) {
+	iniFile, err := ini.Load([]byte(additionalConfig))
+	if err != nil {
+		return false, fmt.Errorf("failed to load spec.rabbitmq.additionalConfig: %w", err)
+	}
+
+	section := iniFile.Section("")
+	for _, key := range section.KeyStrings() {
+		if strings.HasPrefix(key, "auth_mechanisms") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+var ErrInvalidEnvConfig = errors.New("spec.rabbitmq.envConfig must not contain shell command substitution ('$(...)' or backticks)")
+
+func validateEnvConfig(envConfig string) error {
+	if strings.Contains(envConfig, "$(") || strings.Contains(envConfig, "`") {
+		return ErrInvalidEnvConfig
+	}
+	return nil
 }

@@ -17,7 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	"github.com/rabbitmq/cluster-operator/internal/metadata"
+	"github.com/rabbitmq/cluster-operator/v2/internal/metadata"
 )
 
 const (
@@ -47,8 +47,9 @@ func (builder *RoleBindingBuilder) Update(object client.Object) error {
 	}
 	roleBinding.Subjects = []rbacv1.Subject{
 		{
-			Kind: "ServiceAccount",
-			Name: builder.Instance.ChildResourceName(serviceAccountName),
+			Kind:      "ServiceAccount",
+			Name:      builder.Instance.ChildResourceName(serviceAccountName),
+			Namespace: builder.Instance.Namespace,
 		},
 	}
 
