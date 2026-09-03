@@ -52,13 +52,13 @@ CMCTL ?= $(LOCALBIN)/cmctl
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.8.1
-CONTROLLER_TOOLS_VERSION ?= v0.21.0
-GOVULNCHECK_VERSION ?= v1.3.0
+CONTROLLER_TOOLS_VERSION ?= v0.22.0
+GOVULNCHECK_VERSION ?= v1.7.0
 CRD_REF_DOCS_VERSION ?= v0.3.0
 YJ_VERSION ?= v5.1.0
-YTT_VERSION ?= v0.55.0
+YTT_VERSION ?= v0.55.2
 CMCTL_VERSION ?= v2.5.0
-KIND_VERSION ?= v0.31.0
+KIND_VERSION ?= v0.33.0
 CERT_MANAGER_VERSION ?= v1.15.1
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
